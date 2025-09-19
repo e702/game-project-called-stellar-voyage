@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="en">
+    <head>
+        <link rel="stylesheet" href="dictionary_style.css">
+        <link rel="icon" type="image/x-icon" href="tealGlade.ico">
+        <title>Stellar Voyage Dictionary</title>
+    </head>
+    <body>
+        <div id="main-content">
+            <nav>
+                <ul>
+                    <li><a href="index.html" style="color: #fff">Play The Game</a></li>
+                    <li><a class="active" href="stellar_voyage_dictionary.html" style="color: #000">How To Play</a></li>
+                    <li><a href="planned.html" style="color: #fff">Development Plans</a></li>
+                    <li><a href="space_test.html" style="color: #fff">Space Test</a></li>
+                </ul>
+            </nav>
+            <section class="semi-transparent-background">
+                <h1>Ship Controls</h1>
+                <p>The 'W' and 'S' keys move the ship forwards / backwards in the direction it is pointing.</p>
+                <p>The 'A' and 'D' keys turn the ship counterclockwise / clockwise respectively.</p>
+            </section>
+            <section class="semi-transparent-background">
+                <h1>The HUD</h1>
+                <p>On the right side of the screen, you can find the HUD menu, which displays your ship's health, its thrust output and its angle.</p>
+                <p>Ship health goes down if you hit a planet over a certain velocity, which can lead to control impairment (over 7.5 pixels/frame).</p>
+                <p>Thrust output is how much your velocity will change while thrust is applied in pixels/frame (acceleration).</p>
+                <p>The ship's angle shows the direction it is pointing in degrees (left: 0 to -180, right: 0 to +180).</p>
+            </section>
+            <section class="semi-transparent-background">
+                <h1>The Radar</h1>
+                <p>The Radar can be found in the bottom half of the HUD, and it displays the locations of objects in the solar system.</p>
+                <p>The scale of the Radar can be controlled with a slider below the main game view to see more or less of the solar system.</p>
+                <p>Different objects have different colored icons.</p>
+                <p>Yellow indicates that an object is a Star.</p>
+                <p>Green indicates that an object is a Planet.</p>
+                <p>White indicates that an object is a Comet.</p>
+                <p>You can click on a planet in the radar to display pointers around your ship.</p>
+                <p>One with the distance to the planet in pixels and the other in the direction of the planet's relative velocity.</p>
+                <details>
+                    <summary style="color: #fff;">Graphic Explanation</summary>
+                    <img id="radar-explanation" src="radar_explanation.png" alt="Radar Explanation">
+                </details>
+            </section>
+            <section class="semi-transparent-background">
+                <h1>Saving / Loading</h1>
+                <p>The f5 and f9 buttons can be used to save and load a system.</p>
+                <p>The save state is stored locally and can be loaded even when reopening the browser.</p>
+            </section>
+            <section class="semi-transparent-background">
+                <h1>What To Do?</h1>
+                <p>You can fly the ship around the solar system and land on different planets.</p>
+                <p>Gravity is a major theme in Stellar Voyage - The planets, comets and even your ship is bound by gravity.</p>
+                <p>Planets can collide and merge into a larger one if they get too close to one another.</p>
+                <p>I understand there isn't that much to do in this version of Stellar Voyage, but you can check the <a href="planned.html" style="color: #aaf">Plans for the Game's Development</a> to learn about what's to come in the future.</p>
+            </section>
+        </div>
+        <canvas id="stars"></canvas>
+        <script src="dictionary_stars.js"></script>
+    </body>
+</html>

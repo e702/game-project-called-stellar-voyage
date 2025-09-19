@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html>
+    <head>
+        <link rel="stylesheet" href="stellar_voyage_style.css">
+        <link rel="icon" type="image/x-icon" href="tealGlade.ico">
+        <title>Sandbox Mode</title>
+    </head>
+    <body style="background-color:#000080">
+        <div id="titleScreen">
+            <img src="Planets/grayPlanet.png" id="titlePlanet">
+            <h1>Stellar Voyage - Sandbox Mode</h1>
+            <a href="stellar_voyage_dictionary.html" style="color: #fff">You can click here to learn more about playing Stellar Voyage.</a>
+            <p>You are currently in the Sandbox Mode.</p>
+            <p>The purpose of this mode is to observe (and eventually edit) star systems using a free camera.</p>
+            <div id="clickStart">
+                <h1>Click here to Start.</h1>
+            </div>
+            <img src="Player Images/shipNorth.png" id="titleShip">
+            <img src="Player Images/hauyneFront.png" id="titleHauyne">
+            <img id="logo0" src="Glade's Fate/glade0.png" style="width: 300px; display:none">
+            <img id="logo1" src="Glade's Fate/glade1.png" style="width: 300px; display:none">
+            <img id="logo2" src="Glade's Fate/glade2.png" style="width: 300px; display:none">
+            <img id="logo3" src="Glade's Fate/glade3.png" style="width: 300px; display:none">
+        </div>
+        <div style="display: flex; flex-direction: row;">
+            <canvas id="gameview" width="1080" height="720"></canvas>
+            <canvas id="hud" width="300" height="720"></canvas>
+        </div>
+        <div style="background-color: #000080; color: white; padding: 10px; margin-top: 10px; margin-right: 483px;" class="radarContols">
+            <label for="radarSlider">Radar Range:</label>
+            <input type="range" id="radarSlider" min="2000" max="100000" step="1000" value="4000">
+            <span id="radarValue">4000</span>
+            <label for="radarSteps">Radar Steps (Higher = lower accuracy):</label>
+            <input type="range" id="radarSteps" min="1000" max="3000" step="100" value="1000">
+            <span id="radarStepsValue">1000</span>
+        </div>
+        <script src="planetExploration.js"></script>
+        <script src="space_test.js"></script>
+        <img id="shipNorth" src="Player Images/shipNorth.png" style="display:none;">
+        <img id="shipSouth" src="Player Images/shipSouth.png" style="display:none;">
+        <img id="shipEast" src="Player Images/shipEast.png" style="display:none;">
+        <img id="shipWest" src="Player Images/shipWest.png" style="display:none;">
+        <img id="hauyneFront" src="Player Images/hauyneFront.png" style="display:none;">
+        <img id="hauyneLeft" src="Player Images/hauyneLeft.png" style="display:none;">
+        <img id="hauyneLeftStep0" src="Player Images/hauyneLeftStep0.png" style="display:none;">
+        <img id="hauyneLeftStep1" src="Player Images/hauyneLeftStep1.png" style="display:none;">
+        <img id="hauyneRight" src="Player Images/hauyneRight.png" style="display:none;">
+        <img id="hauyneRightStep0" src="Player Images/hauyneRightStep0.png" style="display:none;">
+        <img id="hauyneRightStep1" src="Player Images/hauyneRightStep1.png" style="display:none;">
+        <img id="dustTail" src="effects/dustTail.png" style="display:none;">
+        <img id="ionTail" src="effects/ionTail.png" style="display:none;">
+        <img id="exhaust0" src="effects/exhaust0.png" style="display:none;">
+        <img id="exhaust1" src="effects/exhaust1.png" style="display:none;">
+        <img id="exhaust2" src="effects/exhaust2.png" style="display:none;">
+        <img id="amberPlanet" src="Planets/amberPlanet.png" style="display:none;">
+        <img id="bandsPlanet" src="Planets/bandsPlanet.png" style="display:none;">
+        <img id="bloodPlanet" src="Planets/bloodPlanet.png" style="display:none;">
+        <img id="bluePlanet" src="Planets/bluePlanet.png" style="display:none;">
+        <img id="boilingPlanet" src="Planets/boilingPlanet.png" style="display:none;">
+        <img id="brownPlanet" src="Planets/brownPlanet.png" style="display:none;">
+        <img id="cataractPlanet" src="Planets/cataractPlanet.png" style="display:none;">
+        <img id="comet" src="Planets/comet.bmp" style="display:none;">
+        <img id="cratersPlanet" src="Planets/cratersPlanet.png" style="display:none;">
+        <img id="crevassePlanet" src="Planets/crevassePlanet.png" style="display:none;">
+        <img id="deadPlanet" src="Planets/deadPlanet.png" style="display:none;">
+        <img id="dyingPlanet" src="Planets/dyingPlanet.png" style="display:none;">
+        <img id="grayPlanet" src="Planets/grayPlanet.png" style="display:none;">
+        <img id="greenPlanet" src="Planets/greenPlanet.png" style="display:none;">
+        <img id="harshPlanet" src="Planets/harshPlanet.png" style="display:none;">
+        <img id="icePlanet" src="Planets/icePlanet.png" style="display:none;">
+        <img id="islandsPlanet" src="Planets/islandsPlanet.png" style="display:none;">
+        <img id="jaundicePlanet" src="Planets/jaundicePlanet.png" style="display:none;">
+        <img id="lightningPlanet" src="Planets/lightningPlanet.png" style="display:none;">
+        <img id="methanePlanet" src="Planets/methanePlanet.png" style="display:none;">
+        <img id="oceanPlanet" src="Planets/oceanPlanet.png" style="display:none;">
+        <img id="orangePlanet" src="Planets/orangePlanet.png" style="display:none;">
+        <img id="oxidePlanet" src="Planets/oxidePlanet.png" style="display:none;">
+        <img id="pastelPlanet" src="Planets/pastelPlanet.png" style="display:none;">
+        <img id="redPlanet" src="Planets/redPlanet.png" style="display:none;">
+        <img id="rustPlanet" src="Planets/rustPlanet.png" style="display:none;">
+        <img id="toxicPlanet" src="Planets/toxicPlanet.png" style="display:none;">
+        <img id="veilPlanet" src="Planets/veilPlanet.png" style="display:none;">
+        <img id="weirdPlanet" src="Planets/weirdPlanet.png" style="display:none;">
+        <img id="yellowStar" src="Planets/yellowStar.bmp" style="display:none;">
+        <audio id="frozenPlanetAmbience" src="Frozen Planet - Andreas Brunnmeier.mp3" loop></audio>
+    </body>
+</html>

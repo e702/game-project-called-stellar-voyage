@@ -1,0 +1,89 @@
+body, html {
+    margin: 0;
+    padding: 0;
+    overflow: auto;
+}
+
+section {
+    display: block;
+    width: 60%;
+    margin: auto;
+    margin-top: 16px;
+    padding: 16px;
+    border-radius: 16px;
+}
+
+h1 {
+    display: block;
+    width: 100%;
+    margin: auto;
+    margin-top: 16px;
+    padding: 16px;
+    color: #fff;
+}
+
+p {
+    display: block;
+    width: 100%;
+    margin: auto;
+    padding: 16px;
+    color: #fff;
+}
+
+ul {
+    list-style-type: none;
+    width: 70%;
+    margin: auto;
+    padding: 16px;
+    background-color: #000080;
+    border: 2px solid white;
+    border-radius: 10px;
+}
+
+li {
+    display: inline;
+    margin: auto;
+    border-right: 2px solid #fff;
+    border-left: 2px solid #fff;
+}
+
+li a {
+    display: inline;
+    color: #fff;
+    text-align: center;
+    padding: 14px 16px;
+}
+
+li a:hover {
+    background-color: #8080FF;
+}
+
+.active {
+    background-color: #ff8000;
+    color: #000;
+}
+
+.semi-transparent-background {
+    background-color: rgba(255, 255, 255, 0.5);
+}
+
+#stars {
+    display: block;
+    position: fixed;
+    top: 0; left: 0;
+    z-index: -1;
+    pointer-events: none;
+}
+
+#main-content {
+    position: relative;
+    z-index: 1;
+}
+
+#radar-explanation {
+    display: block;
+    width: 90%;
+    margin: auto;
+    padding: 16px;
+    border-radius: 16px;
+}
