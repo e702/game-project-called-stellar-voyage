@@ -840,6 +840,8 @@ function setupGame() {
     ctx = canvas.getContext("2d");
     hudCanvas = document.getElementById("hud");
     hudCtx = hudCanvas.getContext("2d");
+    altCanvas = document.getElementById("2dview");
+    altCtx = altCanvas.getContext("2d");
 
     // Initialize planet type arrays
     giants = [
