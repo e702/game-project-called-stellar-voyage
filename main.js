@@ -1,7 +1,8 @@
 // main.js
 // This file contains the main game logic for Stellar Voyage.
 // TODO LIST: add functionality to the wormhole, add effect when passing through wormhole, add sound effects / sounds / music, add telescope view with radio capabilities.
-let canvas, ctx, hudCanvas, hudCtx, ship, shipNorth, greenPlanet, planets, comets;
+let canvas, ctx, hudCanvas, hudCtx, altCanvas, altCtx, ship, shipNorth, greenPlanet, planets, comets;
+let alternateView; // Will be initialized after the AlternateView class is loaded
 let random = Math.floor(Math.random() * 100) + 10; // Random width for the planet
 const keys = {};
 const G = 20; // Gravitational constant (tweak for feel)
@@ -821,6 +822,9 @@ window.onload = () => {
     
     ambience = document.getElementById("frozenPlanetAmbience");
     
+    // Initialize alternate view instance
+    alternateView = new AlternateView();
+    
     showLoadingScreen();
     loadAssets().then(() => {
         assetsLoaded = true;
@@ -842,6 +846,9 @@ function setupGame() {
     hudCtx = hudCanvas.getContext("2d");
     altCanvas = document.getElementById("2dview");
     altCtx = altCanvas.getContext("2d");
+
+    // Initialize alternate view
+    alternateView.initialize(altCanvas, altCtx);
 
     // Initialize planet type arrays
     giants = [
@@ -1629,6 +1636,8 @@ function draw() {
     }
     hudCtx.fillStyle = "#00ffbb";
     hudCtx.fillText("O: Wormhole", 20, hudCanvas.height - 10);
+    hudCtx.fillStyle = "#8080ff";
+    hudCtx.fillText("H: Horizon View", 180, hudCanvas.height - 10);
     // File status indicator
     if (savedState) {
         hudCtx.fillStyle = "#bbbbff";
@@ -2203,6 +2212,17 @@ function draw() {
                 planets.splice(i, 1, mergedPlanet); // Replace planetA with mergedPlanet
                 break; // Restart the loop since the array has changed
             }
+        }
+    }
+    
+    // Update and show alternate view only when visible
+    if (alternateView && altCtx) {
+        const altViewPanel = document.getElementById("altViewPanel");
+        const isVisible = altViewPanel && altViewPanel.style.display !== 'none';
+        
+        if (isVisible) {
+            alternateView.update();
+            alternateView.show();
         }
     }
 }
