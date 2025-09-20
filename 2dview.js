@@ -19,15 +19,30 @@ class AlternateView {
         this.lastRadioUpdate = 0; // Timestamp for throttling radio updates
         this.radioUpdateInterval = 50; // Update radio every 50ms instead of every frame
         this.lastCleanup = 0; // Timestamp for cleanup operations
-        this.cleanupInterval = 5000; // Cleanup every 5 seconds
+        this.cleanupInterval = 10000; // Cleanup every 10 seconds (reduced frequency)
+        this.radioWasEnabledBeforeClose = false; // Track radio state when view closes
+        this.viewIsOpen = false; // Track if the view panel is currently open
     }
     
     initialize(canvas, ctx) {
         this.canvas = canvas;
         this.ctx = ctx;
+        this.viewIsOpen = true; // View is open when initialized
     }
     
     update() {
+        // Early exit if view is not open to prevent unnecessary processing
+        if (!this.viewIsOpen) {
+            // Only handle radio fade-out when view is closed
+            if (this.activeRadioSignals.size > 0) {
+                this.activeRadioSignals.forEach((targetVolume, audioElement) => {
+                    this.activeRadioSignals.set(audioElement, 0);
+                });
+                this.updateRadioVolumes();
+            }
+            return;
+        }
+        
         this.visibleBodies = [];
         
         if (!ship || !planets) return;
@@ -71,7 +86,7 @@ class AlternateView {
         
         // Update radio system if enabled (throttled for performance)
         const now = Date.now();
-        if (this.radioEnabled && (now - this.lastRadioUpdate) > this.radioUpdateInterval) {
+        if (this.radioEnabled && this.viewIsOpen && (now - this.lastRadioUpdate) > this.radioUpdateInterval) {
             this.updateRadioSystem();
             this.lastRadioUpdate = now;
         } else if (!this.radioEnabled && this.activeRadioSignals.size > 0) {
@@ -91,12 +106,12 @@ class AlternateView {
             }
         }
         
-        // Always update volumes smoothly (but skip if no active signals)
-        if (this.activeRadioSignals.size > 0) {
+        // Only update volumes when necessary and throttled
+        if (this.activeRadioSignals.size > 0 && (now - this.lastRadioUpdate) > this.radioUpdateInterval) {
             this.updateRadioVolumes();
         }
         
-        // Periodic cleanup to prevent memory leaks
+        // Periodic cleanup to prevent memory leaks (less frequent)
         if ((now - this.lastCleanup) > this.cleanupInterval) {
             this.cleanupRadioSignals();
             this.lastCleanup = now;
@@ -111,6 +126,12 @@ class AlternateView {
         // Clear any existing signals first
         this.shutdownRadioSignals();
         
+        // Create a reusable error handler
+        this._errorHandler = (e) => {
+            console.warn("Radio audio error:", e.target);
+            this.activeRadioSignals.delete(e.target);
+        };
+        
         // Start all radio signals playing but muted
         Object.values(radioSounds).forEach(audioElement => {
             if (audioElement && audioElement.tagName === 'AUDIO') {
@@ -124,11 +145,8 @@ class AlternateView {
                         audioElement.preload = 'auto';
                     }
                     
-                    // Add error handler
-                    audioElement.addEventListener('error', (e) => {
-                        console.warn("Radio audio error:", e);
-                        this.activeRadioSignals.delete(audioElement);
-                    });
+                    // Add error handler (use the reusable one)
+                    audioElement.addEventListener('error', this._errorHandler);
                     
                     audioElement.play().catch(error => {
                         console.warn("Could not start radio signal:", error);
@@ -147,9 +165,16 @@ class AlternateView {
     shutdownRadioSignals() {
         // Stop all radio signals and clear references
         this.activeRadioSignals.forEach((targetVolume, audioElement) => {
-            audioElement.pause();
-            audioElement.currentTime = 0;
-            audioElement.volume = 0; // Ensure volume is reset
+            try {
+                audioElement.pause();
+                audioElement.currentTime = 0;
+                audioElement.volume = 0; // Ensure volume is reset
+                
+                // Remove any event listeners to prevent memory leaks
+                audioElement.removeEventListener('error', this._errorHandler);
+            } catch (error) {
+                console.warn("Error stopping radio signal:", error);
+            }
         });
         this.activeRadioSignals.clear();
         this.currentRadioSignal = null;
@@ -216,28 +241,64 @@ class AlternateView {
     }
     
     updateRadioVolumes() {
-        // Only update volumes if radio is enabled and there are active signals
-        if (!this.radioEnabled || this.activeRadioSignals.size === 0) {
+        // Only update volumes if there are active signals
+        if (this.activeRadioSignals.size === 0) {
             return;
         }
         
+        // If radio is disabled OR view is closed, fade everything to zero
+        const shouldFadeOut = !this.radioEnabled || !this.viewIsOpen;
+        
+        // Track if any volume changes were made
+        let volumesChanged = false;
+        
         // Smoothly adjust all radio signal volumes toward their targets
         this.activeRadioSignals.forEach((targetVolume, audioElement) => {
-            const currentVolume = audioElement.volume;
-            const volumeDifference = targetVolume - currentVolume;
-            
-            // Skip update if volume difference is negligible (optimization)
-            if (Math.abs(volumeDifference) < 0.001) {
-                audioElement.volume = targetVolume; // Set exact target
-                return;
+            try {
+                const currentVolume = audioElement.volume;
+                
+                // Override target volume to 0 if we should fade out
+                const effectiveTargetVolume = shouldFadeOut ? 0 : targetVolume;
+                const volumeDifference = effectiveTargetVolume - currentVolume;
+                
+                // Skip update if volume difference is negligible (optimization)
+                if (Math.abs(volumeDifference) < 0.001) {
+                    audioElement.volume = effectiveTargetVolume; // Set exact target
+                    return;
+                }
+                
+                // Use smooth volume transitions
+                const fadeSpeed = shouldFadeOut ? 0.15 : 0.05; // Much faster fade when shutting down
+                const newVolume = currentVolume + (volumeDifference * fadeSpeed);
+                
+                audioElement.volume = Math.max(0, Math.min(1, newVolume));
+                volumesChanged = true;
+            } catch (error) {
+                console.warn("Error updating audio volume:", error);
+                this.activeRadioSignals.delete(audioElement);
             }
-            
-            // Use smooth volume transitions
-            const fadeSpeed = 0.05; // Adjust for faster/slower fading
-            const newVolume = currentVolume + (volumeDifference * fadeSpeed);
-            
-            audioElement.volume = Math.max(0, Math.min(1, newVolume));
         });
+        
+        // Clean up completely silent signals when view is closed (only if volumes changed)
+        if (!this.viewIsOpen && volumesChanged) {
+            const silentSignals = [];
+            this.activeRadioSignals.forEach((targetVolume, audioElement) => {
+                if (audioElement.volume <= 0.001) {
+                    try {
+                        audioElement.pause();
+                        audioElement.currentTime = 0;
+                        silentSignals.push(audioElement);
+                    } catch (error) {
+                        console.warn("Error pausing audio:", error);
+                        silentSignals.push(audioElement);
+                    }
+                }
+            });
+            
+            silentSignals.forEach(audioElement => {
+                this.activeRadioSignals.delete(audioElement);
+            });
+        }
     }
     
     getRadioSignalForBody(bodyInfo) {
@@ -306,6 +367,29 @@ class AlternateView {
         
         if (deadSignals.length > 0) {
             console.log(`Cleaned up ${deadSignals.length} dead radio signals`);
+        }
+    }
+    
+    // Handle radio system when horizon view is closed
+    pauseRadioForViewClose() {
+        this.viewIsOpen = false;
+        this.radioWasEnabledBeforeClose = this.radioEnabled;
+        
+        // Immediately stop all radio processing and audio
+        if (this.activeRadioSignals.size > 0) {
+            console.log("Horizon view closed - immediately stopping radio signals");
+            this.shutdownRadioSignals();
+        }
+    }
+    
+    // Handle radio system when horizon view is opened
+    resumeRadioForViewOpen() {
+        this.viewIsOpen = true;
+        
+        // If radio was enabled before closing, restart the signals
+        if (this.radioWasEnabledBeforeClose && this.radioEnabled) {
+            console.log("Horizon view opened - restarting radio signals");
+            this.initializeRadioSignals();
         }
     }
     
@@ -722,6 +806,17 @@ function setupAlternateViewControls() {
     function togglePanel() {
         isDropdownOpen = !isDropdownOpen;
         altViewPanel.style.display = isDropdownOpen ? 'block' : 'none';
+        
+        // Handle radio system when view is toggled
+        if (alternateView) {
+            if (!isDropdownOpen) {
+                // View is being closed - pause radio system to prevent background audio
+                alternateView.pauseRadioForViewClose();
+            } else {
+                // View is being opened - resume radio system if it was enabled
+                alternateView.resumeRadioForViewOpen();
+            }
+        }
     }
     
     // Store toggle function globally for H key access
