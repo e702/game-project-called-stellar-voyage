@@ -13,11 +13,13 @@ class AlternateView {
         this.radioEnabled = false; // Toggle for radio system
         this.currentRadioSignal = null; // Currently playing radio signal
         this.radioVolume = 0.5; // Radio volume (0.0 to 1.0)
-        this.radioRange = 15; // Angle range in degrees for radio reception
+        this.radioRange = 30; // Angle range in degrees for radio reception
         this.fadeDistance = 100; // Distance from center for volume fade
         this.activeRadioSignals = new Map(); // Track all active radio signals with their target volumes
-        this.volumeUpdateThrottle = 0; // Throttle volume updates to reduce CPU usage
-        this.volumeUpdateInterval = 3; // Update volumes every N frames (60fps / 3 = 20fps volume updates)
+        this.lastRadioUpdate = 0; // Timestamp for throttling radio updates
+        this.radioUpdateInterval = 50; // Update radio every 50ms instead of every frame
+        this.lastCleanup = 0; // Timestamp for cleanup operations
+        this.cleanupInterval = 5000; // Cleanup every 5 seconds
     }
     
     initialize(canvas, ctx) {
@@ -67,17 +69,37 @@ class AlternateView {
         // Sort by distance (farthest first for proper layering - distant objects drawn first)
         this.visibleBodies.sort((a, b) => b.distance - a.distance);
         
-        // Update radio system if enabled
-        if (this.radioEnabled) {
+        // Update radio system if enabled (throttled for performance)
+        const now = Date.now();
+        if (this.radioEnabled && (now - this.lastRadioUpdate) > this.radioUpdateInterval) {
             this.updateRadioSystem();
-            // Always call updateRadioVolumes when radio is enabled, but it's now throttled internally
-            this.updateRadioVolumes();
-        } else if (this.activeRadioSignals.size > 0) {
-            // Only fade out signals if radio was recently disabled
+            this.lastRadioUpdate = now;
+        } else if (!this.radioEnabled && this.activeRadioSignals.size > 0) {
+            // Fade out all signals if radio is disabled, then clear them
+            let allSilent = true;
             this.activeRadioSignals.forEach((targetVolume, audioElement) => {
                 this.activeRadioSignals.set(audioElement, 0);
+                if (audioElement.volume > 0.001) {
+                    allSilent = false;
+                }
             });
             this.updateRadioVolumes();
+            
+            // If all signals are silent, clear the map to prevent memory buildup
+            if (allSilent) {
+                this.shutdownRadioSignals();
+            }
+        }
+        
+        // Always update volumes smoothly (but skip if no active signals)
+        if (this.activeRadioSignals.size > 0) {
+            this.updateRadioVolumes();
+        }
+        
+        // Periodic cleanup to prevent memory leaks
+        if ((now - this.lastCleanup) > this.cleanupInterval) {
+            this.cleanupRadioSignals();
+            this.lastCleanup = now;
         }
     }
     
@@ -86,9 +108,12 @@ class AlternateView {
             return;
         }
         
-        // Only initialize signals that aren't already active
+        // Clear any existing signals first
+        this.shutdownRadioSignals();
+        
+        // Start all radio signals playing but muted
         Object.values(radioSounds).forEach(audioElement => {
-            if (audioElement && audioElement.tagName === 'AUDIO' && !this.activeRadioSignals.has(audioElement)) {
+            if (audioElement && audioElement.tagName === 'AUDIO') {
                 try {
                     audioElement.volume = 0;
                     audioElement.loop = true;
@@ -99,48 +124,39 @@ class AlternateView {
                         audioElement.preload = 'auto';
                     }
                     
-                    // Only play if not already playing
-                    if (audioElement.paused) {
-                        audioElement.play().catch(error => {
-                            console.warn("Could not start radio signal:", audioElement.id, error);
-                        });
-                    }
+                    // Add error handler
+                    audioElement.addEventListener('error', (e) => {
+                        console.warn("Radio audio error:", e);
+                        this.activeRadioSignals.delete(audioElement);
+                    });
+                    
+                    audioElement.play().catch(error => {
+                        console.warn("Could not start radio signal:", error);
+                        return; // Skip this audio element
+                    });
                     
                     // Track this signal in our active signals map
                     this.activeRadioSignals.set(audioElement, 0);
                 } catch (error) {
-                    console.warn("Error initializing radio signal:", audioElement.id, error);
+                    console.warn("Error initializing radio signal:", error);
                 }
             }
         });
     }
     
     shutdownRadioSignals() {
-        // Gradually fade out all signals before stopping them
-        let signalsToStop = [];
-        
+        // Stop all radio signals and clear references
         this.activeRadioSignals.forEach((targetVolume, audioElement) => {
-            if (audioElement.volume <= 0.01) {
-                // Signal is already quiet enough, stop it immediately
-                audioElement.pause();
-                audioElement.currentTime = 0;
-                signalsToStop.push(audioElement);
-            } else {
-                // Set to fade out
-                this.activeRadioSignals.set(audioElement, 0);
-            }
+            audioElement.pause();
+            audioElement.currentTime = 0;
+            audioElement.volume = 0; // Ensure volume is reset
         });
-        
-        // Remove fully stopped signals from tracking
-        signalsToStop.forEach(audioElement => {
-            this.activeRadioSignals.delete(audioElement);
-        });
-        
+        this.activeRadioSignals.clear();
         this.currentRadioSignal = null;
         
-        // If no signals are left active, clear the map completely
-        if (signalsToStop.length === this.activeRadioSignals.size) {
-            this.activeRadioSignals.clear();
+        // Force garbage collection hint
+        if (typeof gc === 'function') {
+            gc();
         }
     }
 
@@ -200,25 +216,24 @@ class AlternateView {
     }
     
     updateRadioVolumes() {
-        // Throttle volume updates to reduce CPU usage
-        this.volumeUpdateThrottle++;
-        if (this.volumeUpdateThrottle < this.volumeUpdateInterval) {
+        // Only update volumes if radio is enabled and there are active signals
+        if (!this.radioEnabled || this.activeRadioSignals.size === 0) {
             return;
         }
-        this.volumeUpdateThrottle = 0;
         
         // Smoothly adjust all radio signal volumes toward their targets
         this.activeRadioSignals.forEach((targetVolume, audioElement) => {
             const currentVolume = audioElement.volume;
             const volumeDifference = targetVolume - currentVolume;
             
-            // Only update if the difference is significant (reduces unnecessary DOM updates)
-            if (Math.abs(volumeDifference) < 0.01) {
+            // Skip update if volume difference is negligible (optimization)
+            if (Math.abs(volumeDifference) < 0.001) {
+                audioElement.volume = targetVolume; // Set exact target
                 return;
             }
             
             // Use smooth volume transitions
-            const fadeSpeed = 0.15; // Increased for faster transitions since we're updating less frequently
+            const fadeSpeed = 0.05; // Adjust for faster/slower fading
             const newVolume = currentVolume + (volumeDifference * fadeSpeed);
             
             audioElement.volume = Math.max(0, Math.min(1, newVolume));
@@ -268,24 +283,30 @@ class AlternateView {
             this.initializeRadioSignals();
         } else {
             this.shutdownRadioSignals();
-            // Schedule a cleanup after a short delay to ensure fade-out completes
-            setTimeout(() => {
-                if (!this.radioEnabled) {
-                    this.forceStopAllRadioSignals();
-                }
-            }, 1000);
         }
         console.log(`Radio ${this.radioEnabled ? 'enabled' : 'disabled'}`);
     }
     
-    forceStopAllRadioSignals() {
-        // Force stop all radio signals and clear memory
+    // Cleanup method to remove dead audio references and prevent memory leaks
+    cleanupRadioSignals() {
+        if (this.activeRadioSignals.size === 0) return;
+        
+        const deadSignals = [];
         this.activeRadioSignals.forEach((targetVolume, audioElement) => {
-            audioElement.pause();
-            audioElement.currentTime = 0;
+            // Check if audio element is still valid
+            if (!audioElement || !audioElement.tagName || audioElement.error) {
+                deadSignals.push(audioElement);
+            }
         });
-        this.activeRadioSignals.clear();
-        this.currentRadioSignal = null;
+        
+        // Remove dead signals
+        deadSignals.forEach(deadSignal => {
+            this.activeRadioSignals.delete(deadSignal);
+        });
+        
+        if (deadSignals.length > 0) {
+            console.log(`Cleaned up ${deadSignals.length} dead radio signals`);
+        }
     }
     
     calculateBodyPosition(body, ship) {

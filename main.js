@@ -2799,6 +2799,12 @@ class Comet {
     
     generateParticles() {
         const distanceToStar = Math.hypot(star.x - this.x, star.y - this.y);
+        const distanceToShip = Math.hypot(ship.worldX - this.x, ship.worldY - this.y);
+        
+        // Only generate particles if the comet is within 3000 pixels of the ship
+        if (distanceToShip > 3000) {
+            return; // Skip particle generation if too far from ship
+        }
         
         // Generate ion tail particles (repelled directly away from star)
         if (distanceToStar < 20000) { // Only generate tails when close enough to star
