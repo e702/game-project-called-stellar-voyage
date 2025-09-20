@@ -1,13 +1,23 @@
 // An alternative view for the main game, perceived as a 1 dimensional line based on what the ship can see
 class AlternateView {
     constructor() {
-        this.fov = Math.PI; // 180 degrees field of view
+        this.fov = Math.PI / 2; // 90 degrees field of view
         this.visibleBodies = []; // Store planets/objects in view
         this.canvas = null;
         this.ctx = null;
         this.centerY = 75; // Center line of the 2D view
-        this.maxDistance = 15000; // Maximum distance to show objects
+        this.maxDistance = 200000; // Maximum distance to show objects
         this.isRearView = false; // Toggle for rear view
+        
+        // Radio system properties
+        this.radioEnabled = false; // Toggle for radio system
+        this.currentRadioSignal = null; // Currently playing radio signal
+        this.radioVolume = 0.5; // Radio volume (0.0 to 1.0)
+        this.radioRange = 15; // Angle range in degrees for radio reception
+        this.fadeDistance = 100; // Distance from center for volume fade
+        this.activeRadioSignals = new Map(); // Track all active radio signals with their target volumes
+        this.volumeUpdateThrottle = 0; // Throttle volume updates to reduce CPU usage
+        this.volumeUpdateInterval = 3; // Update volumes every N frames (60fps / 3 = 20fps volume updates)
     }
     
     initialize(canvas, ctx) {
@@ -42,18 +52,240 @@ class AlternateView {
             }
         }
         
-        // Check star
-        if (star) {
-            const bodyInfo = this.calculateBodyPosition(star, ship);
-            if (bodyInfo.inView) {
-                bodyInfo.type = 'star';
-                bodyInfo.object = star;
-                this.visibleBodies.push(bodyInfo);
+        // Check all stars (including binary stars)
+        if (stars) {
+            for (let starBody of stars) {
+                const bodyInfo = this.calculateBodyPosition(starBody, ship);
+                if (bodyInfo.inView) {
+                    bodyInfo.type = 'star';
+                    bodyInfo.object = starBody;
+                    this.visibleBodies.push(bodyInfo);
+                }
             }
         }
         
         // Sort by distance (farthest first for proper layering - distant objects drawn first)
         this.visibleBodies.sort((a, b) => b.distance - a.distance);
+        
+        // Update radio system if enabled
+        if (this.radioEnabled) {
+            this.updateRadioSystem();
+            // Always call updateRadioVolumes when radio is enabled, but it's now throttled internally
+            this.updateRadioVolumes();
+        } else if (this.activeRadioSignals.size > 0) {
+            // Only fade out signals if radio was recently disabled
+            this.activeRadioSignals.forEach((targetVolume, audioElement) => {
+                this.activeRadioSignals.set(audioElement, 0);
+            });
+            this.updateRadioVolumes();
+        }
+    }
+    
+    initializeRadioSignals() {
+        if (typeof radioSounds === 'undefined') {
+            return;
+        }
+        
+        // Only initialize signals that aren't already active
+        Object.values(radioSounds).forEach(audioElement => {
+            if (audioElement && audioElement.tagName === 'AUDIO' && !this.activeRadioSignals.has(audioElement)) {
+                try {
+                    audioElement.volume = 0;
+                    audioElement.loop = true;
+                    
+                    // Special handling for home planet - ensure it loops completely
+                    if (audioElement === radioSounds.homeRadio) {
+                        audioElement.loop = true;
+                        audioElement.preload = 'auto';
+                    }
+                    
+                    // Only play if not already playing
+                    if (audioElement.paused) {
+                        audioElement.play().catch(error => {
+                            console.warn("Could not start radio signal:", audioElement.id, error);
+                        });
+                    }
+                    
+                    // Track this signal in our active signals map
+                    this.activeRadioSignals.set(audioElement, 0);
+                } catch (error) {
+                    console.warn("Error initializing radio signal:", audioElement.id, error);
+                }
+            }
+        });
+    }
+    
+    shutdownRadioSignals() {
+        // Gradually fade out all signals before stopping them
+        let signalsToStop = [];
+        
+        this.activeRadioSignals.forEach((targetVolume, audioElement) => {
+            if (audioElement.volume <= 0.01) {
+                // Signal is already quiet enough, stop it immediately
+                audioElement.pause();
+                audioElement.currentTime = 0;
+                signalsToStop.push(audioElement);
+            } else {
+                // Set to fade out
+                this.activeRadioSignals.set(audioElement, 0);
+            }
+        });
+        
+        // Remove fully stopped signals from tracking
+        signalsToStop.forEach(audioElement => {
+            this.activeRadioSignals.delete(audioElement);
+        });
+        
+        this.currentRadioSignal = null;
+        
+        // If no signals are left active, clear the map completely
+        if (signalsToStop.length === this.activeRadioSignals.size) {
+            this.activeRadioSignals.clear();
+        }
+    }
+
+    updateRadioSystem() {
+        if (!this.visibleBodies || this.visibleBodies.length === 0) {
+            // Set all signals to fade to zero
+            this.activeRadioSignals.forEach((targetVolume, audioElement) => {
+                this.activeRadioSignals.set(audioElement, 0);
+            });
+            this.updateRadioVolumes();
+            this.currentRadioSignal = null;
+            return;
+        }
+        
+        // Reset all signals to zero first
+        this.activeRadioSignals.forEach((targetVolume, audioElement) => {
+            this.activeRadioSignals.set(audioElement, 0);
+        });
+        
+        // Find the object closest to the center crosshair
+        const centerX = this.canvas.width / 2;
+        let closestBody = null;
+        let closestDistance = Infinity;
+        
+        for (let bodyInfo of this.visibleBodies) {
+            const distanceFromCenter = Math.abs(bodyInfo.screenX - centerX);
+            if (distanceFromCenter < closestDistance && distanceFromCenter <= this.fadeDistance) {
+                closestDistance = distanceFromCenter;
+                closestBody = bodyInfo;
+            }
+        }
+        
+        if (closestBody) {
+            this.setRadioSignalVolume(closestBody, closestDistance);
+            this.currentRadioSignal = this.getRadioSignalForBody(closestBody);
+        } else {
+            this.currentRadioSignal = null;
+        }
+        
+        // Update all radio volumes
+        this.updateRadioVolumes();
+    }
+    
+    setRadioSignalVolume(bodyInfo, distanceFromCenter) {
+        const audioElement = this.getRadioSignalForBody(bodyInfo);
+        
+        if (!audioElement) {
+            return;
+        }
+        
+        // Calculate volume based on distance from center
+        const volumeFactor = Math.max(0, 1 - (distanceFromCenter / this.fadeDistance));
+        const targetVolume = this.radioVolume * volumeFactor;
+        
+        // Set the target volume for this signal
+        this.activeRadioSignals.set(audioElement, targetVolume);
+    }
+    
+    updateRadioVolumes() {
+        // Throttle volume updates to reduce CPU usage
+        this.volumeUpdateThrottle++;
+        if (this.volumeUpdateThrottle < this.volumeUpdateInterval) {
+            return;
+        }
+        this.volumeUpdateThrottle = 0;
+        
+        // Smoothly adjust all radio signal volumes toward their targets
+        this.activeRadioSignals.forEach((targetVolume, audioElement) => {
+            const currentVolume = audioElement.volume;
+            const volumeDifference = targetVolume - currentVolume;
+            
+            // Only update if the difference is significant (reduces unnecessary DOM updates)
+            if (Math.abs(volumeDifference) < 0.01) {
+                return;
+            }
+            
+            // Use smooth volume transitions
+            const fadeSpeed = 0.15; // Increased for faster transitions since we're updating less frequently
+            const newVolume = currentVolume + (volumeDifference * fadeSpeed);
+            
+            audioElement.volume = Math.max(0, Math.min(1, newVolume));
+        });
+    }
+    
+    getRadioSignalForBody(bodyInfo) {
+        if (typeof radioSounds === 'undefined') {
+            return null;
+        }
+        
+        switch (bodyInfo.type) {
+            case 'planet':
+                // Map specific planets to their radio signals
+                if (bodyInfo.object.Image === gallery.orangePlanet) {
+                    return radioSounds.trokeRadio;
+                } else if (bodyInfo.object.Image === gallery.tealGlade) {
+                    return radioSounds.homeRadio;
+                } else if (bodyInfo.object.Image === gallery.harshPlanet) {
+                    return radioSounds.poltanRadio;
+                } else if (bodyInfo.object.Image === gallery.methanePlanet) {
+                    return radioSounds.chryseRadio;
+                } else if (bodyInfo.object.Image === gallery.redPlanet) {
+                    return radioSounds.dwarmRadio;
+                }
+                // Default radio signal for unspecified planets could be static
+                return radioSounds.radioStatic;
+                
+            case 'star':
+                if (bodyInfo.object.radius >= 600) {
+                    return radioSounds.solaceRadio; // Main star
+                } else {
+                    return radioSounds.nemesisRadio; // Binary star
+                }
+                
+            case 'comet':
+                return radioSounds.cometRadio;
+                
+            default:
+                return radioSounds.radioStatic;
+        }
+    }
+    
+    toggleRadio() {
+        this.radioEnabled = !this.radioEnabled;
+        if (this.radioEnabled) {
+            this.initializeRadioSignals();
+        } else {
+            this.shutdownRadioSignals();
+            // Schedule a cleanup after a short delay to ensure fade-out completes
+            setTimeout(() => {
+                if (!this.radioEnabled) {
+                    this.forceStopAllRadioSignals();
+                }
+            }, 1000);
+        }
+        console.log(`Radio ${this.radioEnabled ? 'enabled' : 'disabled'}`);
+    }
+    
+    forceStopAllRadioSignals() {
+        // Force stop all radio signals and clear memory
+        this.activeRadioSignals.forEach((targetVolume, audioElement) => {
+            audioElement.pause();
+            audioElement.currentTime = 0;
+        });
+        this.activeRadioSignals.clear();
+        this.currentRadioSignal = null;
     }
     
     calculateBodyPosition(body, ship) {
@@ -87,7 +319,8 @@ class AlternateView {
         const inView = Math.abs(relativeAngle) <= halfFov && distance <= this.maxDistance;
         
         // Calculate screen position (map angle to horizontal position)
-        const screenX = (relativeAngle / halfFov) * (this.canvas.width / 2) + (this.canvas.width / 2);
+        // Use raw calculation that can extend beyond canvas bounds for visibility checking
+        const rawScreenX = (relativeAngle / halfFov) * (this.canvas.width / 2) + (this.canvas.width / 2);
         
         // Calculate apparent size based on distance, actual size, and field of view
         // As FOV decreases (zooming in), objects should appear larger
@@ -95,9 +328,16 @@ class AlternateView {
         const fovZoomFactor = baseFOV / this.fov; // Higher when FOV is smaller (zoomed in)
         const apparentSize = Math.max(1, (body.radius * 200 * fovZoomFactor) / distance);
         
+        // Check if object is visible on canvas using raw screen position
+        // Object is only hidden when it's completely outside the canvas bounds
+        const isVisibleOnCanvas = (rawScreenX + apparentSize > 0) && (rawScreenX - apparentSize < this.canvas.width);
+        
+        // Combine FOV check with canvas visibility check
+        const finalInView = inView && isVisibleOnCanvas;
+        
         return {
-            inView: inView,
-            screenX: screenX,
+            inView: finalInView,
+            screenX: rawScreenX,
             distance: distance,
             relativeAngle: relativeAngle,
             apparentSize: apparentSize,
@@ -181,9 +421,8 @@ class AlternateView {
         const x = bodyInfo.screenX;
         const size = bodyInfo.apparentSize;
         
-        // Calculate y position based on distance (closer objects appear higher)
-        const distanceFactor = 1 - (bodyInfo.distance / this.maxDistance);
-        const y = this.centerY - (distanceFactor * 10); // Objects appear above/below horizon based on distance
+        // Position objects on the horizon line
+        const y = this.centerY;
         
         this.ctx.save();
         
@@ -224,8 +463,52 @@ class AlternateView {
             }
             
         } else if (bodyInfo.type === 'star') {
-            // Draw star using its actual image from the main game
-            if (typeof gallery !== 'undefined' && gallery.yellowStar && gallery.yellowStar.complete) {
+            // Draw star with enhanced glow effects like in the main game
+            const starObj = bodyInfo.object;
+            
+            // Determine star image based on size (main star vs binary star)
+            let starImage = null;
+            if (typeof gallery !== 'undefined') {
+                if (starObj.radius >= 600) {
+                    // Main star (Solace) - use yellow star
+                    starImage = gallery.yellowStar;
+                } else {
+                    // Binary star (Nemesis) - use red star or fallback to yellow
+                    starImage = gallery.redStar || gallery.yellowStar;
+                }
+            }
+            
+            if (starImage && starImage.complete) {
+                // Create multiple glow layers for enhanced effect
+                this.ctx.save();
+                
+                // Outer glow
+                this.ctx.shadowColor = starObj.radius >= 600 ? '#FFFF44' : '#FF6644';
+                this.ctx.shadowBlur = size * 2;
+                this.ctx.globalAlpha = 0.3;
+                this.ctx.beginPath();
+                this.ctx.arc(x, y, size * 1.8, 0, 2 * Math.PI);
+                this.ctx.fillStyle = starObj.radius >= 600 ? '#FFFF44' : '#FF6644';
+                this.ctx.fill();
+                
+                // Middle glow
+                this.ctx.shadowBlur = size * 1.5;
+                this.ctx.globalAlpha = 0.5;
+                this.ctx.beginPath();
+                this.ctx.arc(x, y, size * 1.4, 0, 2 * Math.PI);
+                this.ctx.fill();
+                
+                // Inner glow
+                this.ctx.shadowBlur = size;
+                this.ctx.globalAlpha = 0.7;
+                this.ctx.beginPath();
+                this.ctx.arc(x, y, size * 1.1, 0, 2 * Math.PI);
+                this.ctx.fill();
+                
+                // Reset for star image
+                this.ctx.restore();
+                this.ctx.save();
+                
                 // Create circular clipping path for the star image
                 this.ctx.beginPath();
                 this.ctx.arc(x, y, size, 0, 2 * Math.PI);
@@ -234,31 +517,51 @@ class AlternateView {
                 
                 // Draw the star image within the circular clip
                 this.ctx.drawImage(
-                    gallery.yellowStar, 
+                    starImage, 
                     x - size, 
                     y - size, 
                     size * 2, 
                     size * 2
                 );
                 
-                // Reset clipping and add a bright glow effect
+                // Reset clipping and add bright border
                 this.ctx.restore();
                 this.ctx.save();
-                this.ctx.shadowColor = '#FFFF88';
-                this.ctx.shadowBlur = size;
-                this.ctx.strokeStyle = '#FFFF88';
+                this.ctx.strokeStyle = starObj.radius >= 600 ? '#FFFF88' : '#FF8888';
                 this.ctx.lineWidth = 2;
+                this.ctx.shadowColor = starObj.radius >= 600 ? '#FFFF88' : '#FF8888';
+                this.ctx.shadowBlur = size * 0.5;
                 this.ctx.beginPath();
                 this.ctx.arc(x, y, size, 0, 2 * Math.PI);
                 this.ctx.stroke();
+                
             } else {
-                // Fallback to bright yellow circle
-                this.ctx.fillStyle = '#FFFF88';
-                this.ctx.shadowColor = '#FFFF88';
+                // Fallback to enhanced colored circle with glow
+                this.ctx.save();
+                const starColor = starObj.radius >= 600 ? '#FFFF88' : '#FF8888';
+                
+                // Multiple glow layers
+                this.ctx.shadowColor = starColor;
+                this.ctx.shadowBlur = size * 2;
+                this.ctx.globalAlpha = 0.3;
+                this.ctx.fillStyle = starColor;
+                this.ctx.beginPath();
+                this.ctx.arc(x, y, size * 1.8, 0, 2 * Math.PI);
+                this.ctx.fill();
+                
+                this.ctx.shadowBlur = size * 1.5;
+                this.ctx.globalAlpha = 0.5;
+                this.ctx.beginPath();
+                this.ctx.arc(x, y, size * 1.4, 0, 2 * Math.PI);
+                this.ctx.fill();
+                
                 this.ctx.shadowBlur = size;
+                this.ctx.globalAlpha = 1.0;
                 this.ctx.beginPath();
                 this.ctx.arc(x, y, size, 0, 2 * Math.PI);
                 this.ctx.fill();
+                
+                this.ctx.restore();
             }
             
         } else if (bodyInfo.type === 'comet') {
@@ -363,38 +666,28 @@ class AlternateView {
     }
     
     drawDistanceScale() {
-        // Draw a simple distance scale on the right side
-        const scaleX = this.canvas.width - 180;
-        const scaleY = 20;
-        
         this.ctx.strokeStyle = '#666';
         this.ctx.lineWidth = 1;
-        this.ctx.font = '10px Arial';
+        this.ctx.font = '14px Arial';
         this.ctx.fillStyle = '#AAA';
         this.ctx.textAlign = 'left';
         
-        // Draw scale markers
-        const distances = [1000, 5000, 10000, 15000];
-        for (let i = 0; i < distances.length; i++) {
-            const y = scaleY + (i * 15);
-            this.ctx.fillText(distances[i].toLocaleString(), scaleX, y);
-        }
-        
         // Draw FOV info
-        this.ctx.fillText(`FOV: ${Math.round(this.fov * 180 / Math.PI)}°`, scaleX, scaleY + 80);
-        this.ctx.fillText(`Max Dist: ${this.maxDistance.toLocaleString()}`, scaleX, scaleY + 95);
+        this.ctx.fillText(`FOV: ${Math.round(this.fov * 180 / Math.PI)}°`, this.canvas.width - 130, 20);
+        this.ctx.fillText('Q/E/Scroll to Zoom', this.canvas.width - 130, 40);
+        this.ctx.fillText('C to reset FOV', this.canvas.width - 130, 60);
+        this.ctx.fillText('V for Rear view', this.canvas.width - 130, 80);
         
-        // Draw controls legend
-        this.ctx.fillStyle = '#888';
-        this.ctx.font = '9px Arial';
-        this.ctx.fillText('Controls:', scaleX, scaleY + 115);
-        this.ctx.fillText('H: Toggle Panel', scaleX, scaleY + 128);
-        this.ctx.fillText('V: Rear View (hold)', scaleX, scaleY + 141);
-        this.ctx.fillText('Q/E: FOV ±', scaleX, scaleY + 154);
-        this.ctx.fillText('R: Reset FOV', scaleX, scaleY + 167);
-        this.ctx.fillText('-/+: Distance', scaleX, scaleY + 180);
-        this.ctx.fillText('Wheel: FOV', scaleX, scaleY + 193);
-        this.ctx.fillText('Click: Select', scaleX, scaleY + 206);
+        // Draw radio status
+        this.ctx.fillStyle = this.radioEnabled ? '#00FF00' : '#888';
+        this.ctx.fillText(`Radio: ${this.radioEnabled ? 'ON' : 'OFF'}`, this.canvas.width - 130, 100);
+        this.ctx.fillStyle = '#AAA';
+        this.ctx.fillText('R to toggle radio', this.canvas.width - 130, 120);
+        
+        if (this.radioEnabled && this.currentRadioSignal) {
+            this.ctx.fillStyle = '#FFFF00';
+            this.ctx.fillText('Signal detected', this.canvas.width - 130, 140);
+        }
     }
 }
 
@@ -418,15 +711,7 @@ function setupAlternateViewControls() {
         e.preventDefault();
         if (alternateView) {
             const fovChange = e.deltaY * 0.001; // Adjust sensitivity
-            alternateView.fov = Math.max(Math.PI / 6, Math.min(Math.PI * 2, alternateView.fov + fovChange)); // Clamp between 30° and 360°
-        }
-    });
-    
-    // Right-click to reset FOV
-    altCanvas.addEventListener('contextmenu', (e) => {
-        e.preventDefault();
-        if (alternateView) {
-            alternateView.fov = Math.PI; // Reset to 180°
+            alternateView.fov = Math.max(Math.PI / 90, Math.min(Math.PI, alternateView.fov + fovChange)); // Clamp between 2° and 180°
         }
     });
     
@@ -439,16 +724,26 @@ function setupAlternateViewControls() {
             
             // Find clicked object
             for (let bodyInfo of alternateView.visibleBodies) {
+                // Objects are positioned on the horizon line
+                const bodyY = alternateView.centerY;
+                
                 const distance = Math.sqrt(
                     Math.pow(clickX - bodyInfo.screenX, 2) + 
-                    Math.pow(clickY - (alternateView.centerY - (1 - (bodyInfo.distance / alternateView.maxDistance)) * 30), 2)
+                    Math.pow(clickY - bodyY, 2)
                 );
                 
                 if (distance <= bodyInfo.apparentSize + 10) { // 10px buffer
-                    // Select this object (you can extend this functionality)
+                    // Select this object
                     console.log(`Selected ${bodyInfo.type} at distance ${Math.round(bodyInfo.distance)}`);
                     if (bodyInfo.type === 'planet') {
                         selectedPlanet = bodyInfo.object; // Select planet in main game
+                        autoRotationEnabled = true; // Enable auto-rotation for newly selected planet
+                    } else if (bodyInfo.type === 'comet') {
+                        selectedPlanet = bodyInfo.object; // Use selectedPlanet variable for comets too
+                        autoRotationEnabled = true; // Enable auto-rotation for newly selected comet
+                    } else if (bodyInfo.type === 'star') {
+                        selectedPlanet = bodyInfo.object; // Use selectedPlanet variable for stars too
+                        autoRotationEnabled = true; // Enable auto-rotation for newly selected star
                     }
                     break;
                 }
@@ -484,19 +779,20 @@ window.addEventListener('keydown', (e) => {
     
     switch(e.key.toLowerCase()) {
         case 'q': // Decrease FOV
-            alternateView.fov = Math.max(Math.PI / 6, alternateView.fov - 0.1);
+            alternateView.fov = Math.max(Math.PI / 90, alternateView.fov - 0.1); // 2 degrees
             break;
         case 'e': // Increase FOV
-            alternateView.fov = Math.min(Math.PI * 2, alternateView.fov + 0.1);
+            alternateView.fov = Math.min(Math.PI, alternateView.fov + 0.1); // 180 degrees
             break;
-        case 'r': // Reset FOV
-            alternateView.fov = Math.PI;
+        case 'r': // Toggle radio system
+            if (e.ctrlKey || e.metaKey) {
+                // Allow browser refresh with Ctrl+R or Cmd+R
+                return;
+            }
+            alternateView.toggleRadio();
             break;
-        case '-': // Decrease max distance
-            alternateView.maxDistance = Math.max(5000, alternateView.maxDistance - 2000);
-            break;
-        case '=': // Increase max distance
-            alternateView.maxDistance = Math.min(50000, alternateView.maxDistance + 2000);
+        case 'c': // Reset FOV (changed from 'r' to avoid conflict)
+            alternateView.fov = Math.PI / 2; // 90 degrees
             break;
     }
 });

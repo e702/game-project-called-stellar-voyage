@@ -6,10 +6,444 @@ let alternateView; // Will be initialized after the AlternateView class is loade
 let random = Math.floor(Math.random() * 100) + 10; // Random width for the planet
 const keys = {};
 const G = 20; // Gravitational constant (tweak for feel)
-const maxComets = 10; // Maximum number of comets allowed at once
-let worldSize = 25000; // how far away comets can spawn
+const maxComets = 30; // Maximum number of comets allowed at once
+let worldSize = 50000; // how far away comets can spawn
 let gallery = {}; // Initialize as empty object
+let radioSounds = {}; // Initialize radio sounds gallery
 let giants, terrestrials, moons; // Planet type arrays
+let radarCelestialHitboxes = []; // Hitboxes for radar click detection
+
+// Solar system generation configuration
+const SOLAR_SYSTEM_TYPE = 'hardcoded'; // 'random' or 'hardcoded' - change this to switch between generation types
+
+// Global array to store all stars (for binary star systems)
+let stars = [];
+
+// Helper functions for orbital mechanics (used by both random and hardcoded generation)
+function calculateOrbitalVelocity(planetX, planetY, planetMass, starX, starY, starMass) {
+    const dx = planetX - starX;
+    const dy = planetY - starY;
+    const dist = Math.sqrt(dx * dx + dy * dy);
+    
+    // Calculate orbital velocity using reduced mass for proper n-body dynamics
+    const totalMass = starMass + planetMass;
+    const orbitalSpeed = Math.sqrt(G * totalMass / dist);
+    
+    // Calculate velocities for both star and planet around their center of mass
+    const starVelFactor = planetMass / totalMass;
+    const planetVelFactor = starMass / totalMass;
+    
+    const perpX = -dy / dist;
+    const perpY = dx / dist;
+    
+    return {
+        planetVelX: perpX * orbitalSpeed * planetVelFactor,
+        planetVelY: perpY * orbitalSpeed * planetVelFactor,
+        starVelX: -perpX * orbitalSpeed * starVelFactor,
+        starVelY: -perpY * orbitalSpeed * starVelFactor
+    };
+}
+
+function createPlanetWithOrbit(x, y, radius, planetImage = null, parentStar = null) {
+    const planet = new Planet(x, y, radius);
+    
+    // Set specific image if provided
+    if (planetImage) {
+        planet.Image = planetImage;
+    }
+    
+    // Use the main star if no parent star specified
+    const orbitStar = parentStar || star;
+    
+    // Calculate orbital velocity
+    const velocity = calculateOrbitalVelocity(x, y, planet.mass, orbitStar.x, orbitStar.y, orbitStar.mass);
+    
+    // Add parent star's velocity to planet's orbital velocity (inheritance of motion)
+    planet.velocityX = velocity.planetVelX + (orbitStar.velocityX || 0);
+    planet.velocityY = velocity.planetVelY + (orbitStar.velocityY || 0);
+    
+    // Apply counter-velocity to star (conservation of momentum)
+    orbitStar.velocityX += velocity.starVelX;
+    orbitStar.velocityY += velocity.starVelY;
+    
+    return planet;
+}
+
+// Enhanced orbital velocity calculation that accounts for nearby planets
+function calculateMultiBodyOrbitalVelocity(planetX, planetY, planetMass, parentStar, nearbyPlanets = []) {
+    // Start with basic two-body orbital velocity
+    const basicVelocity = calculateOrbitalVelocity(planetX, planetY, planetMass, parentStar.x, parentStar.y, parentStar.mass);
+    
+    // If no nearby planets, return basic calculation WITH parent star's velocity added
+    if (nearbyPlanets.length === 0) {
+        return {
+            planetVelX: basicVelocity.planetVelX + (parentStar.velocityX || 0),
+            planetVelY: basicVelocity.planetVelY + (parentStar.velocityY || 0),
+            starVelX: basicVelocity.starVelX,
+            starVelY: basicVelocity.starVelY
+        };
+    }
+    
+    // Calculate perturbations from nearby planets
+    let totalPerturbationX = 0;
+    let totalPerturbationY = 0;
+    
+    for (let nearbyPlanet of nearbyPlanets) {
+        const dx = nearbyPlanet.x - planetX;
+        const dy = nearbyPlanet.y - planetY;
+        const distSq = dx * dx + dy * dy;
+        const dist = Math.sqrt(distSq);
+        
+        // Skip if planets are too close (avoid singularities)
+        if (dist < (nearbyPlanet.radius || 50) * 3) {
+            continue;
+        }
+        
+        // Calculate gravitational influence
+        const influence = G * nearbyPlanet.mass / distSq;
+        const influenceX = (dx / dist) * influence;
+        const influenceY = (dy / dist) * influence;
+        
+        // Weight influence by distance (closer planets have more effect)
+        const distanceWeight = 1.0 / (1.0 + dist / 1000); // Normalize by 1000 distance units
+        
+        totalPerturbationX += influenceX * distanceWeight * 0.1; // Scale down perturbation
+        totalPerturbationY += influenceY * distanceWeight * 0.1;
+    }
+    
+    // Apply perturbations as velocity adjustments AND add parent star's velocity
+    return {
+        planetVelX: basicVelocity.planetVelX + totalPerturbationX + (parentStar.velocityX || 0),
+        planetVelY: basicVelocity.planetVelY + totalPerturbationY + (parentStar.velocityY || 0),
+        starVelX: basicVelocity.starVelX,
+        starVelY: basicVelocity.starVelY
+    };
+}
+
+function createMoonWithOrbit(planet, moonRadius, distance, angle, moonImage = null) {
+    const moonX = planet.x + Math.cos(angle) * distance;
+    const moonY = planet.y + Math.sin(angle) * distance;
+    
+    const moon = new Planet(moonX, moonY, moonRadius);
+    
+    // Set specific image if provided
+    if (moonImage) {
+        moon.Image = moonImage;
+    }
+    
+    // Calculate proper orbital mechanics for planet-moon system
+    const planetMass = planet.mass;
+    const moonMass = moon.mass;
+    const totalMass = planetMass + moonMass;
+    
+    // Calculate center of mass (barycenter) of planet-moon system
+    const barycenterX = (planet.x * planetMass + moonX * moonMass) / totalMass;
+    const barycenterY = (planet.y * planetMass + moonY * moonMass) / totalMass;
+    
+    // Distance from star to barycenter
+    const barycenterDistFromStar = Math.hypot(barycenterX - star.x, barycenterY - star.y);
+    
+    // Calculate the orbital velocity that the barycenter should have around the star
+    const barycenterOrbitalSpeed = Math.sqrt(G * star.mass / barycenterDistFromStar);
+    const barycenterTangentX = -(barycenterY - star.y) / barycenterDistFromStar;
+    const barycenterTangentY = (barycenterX - star.x) / barycenterDistFromStar;
+    const barycenterVelX = barycenterTangentX * barycenterOrbitalSpeed;
+    const barycenterVelY = barycenterTangentY * barycenterOrbitalSpeed;
+    
+    // Calculate orbital speeds around barycenter
+    const planetOrbitalSpeed = Math.sqrt(G * moonMass * moonMass / (totalMass * distance));
+    const moonOrbitalSpeed = Math.sqrt(G * planetMass * planetMass / (totalMass * distance));
+    
+    // Calculate directions perpendicular to planet-moon line
+    const perpX = -Math.sin(angle);
+    const perpY = Math.cos(angle);
+    
+    // Set velocities: barycenter motion + orbital motion around barycenter
+    planet.velocityX = barycenterVelX - perpX * planetOrbitalSpeed;
+    planet.velocityY = barycenterVelY - perpY * planetOrbitalSpeed;
+    
+    moon.velocityX = barycenterVelX + perpX * moonOrbitalSpeed;
+    moon.velocityY = barycenterVelY + perpY * moonOrbitalSpeed;
+    
+    return moon;
+}
+
+// Random solar system generation function
+function generateRandomSolarSystem() {
+    console.log("Generating random solar system...");
+    
+    // Initialize stars array with just the main star for random generation
+    stars = [star];
+    
+    let minRadius = 50;
+    let maxRadius = 200;
+    let minMoonRadius = 30;
+    let maxMoonRadius = 50;
+
+    // Generate planets in orbital order from star outward
+    const numPlanets = 5;
+    const minOrbitDistance = star.radius + 3000; // Starting distance from star
+    const baseOrbitSpacing = 6000; // Base spacing between orbits
+    const spacingMultiplier = 15; // How much planet size affects spacing
+    
+    let currentOrbitDistance = minOrbitDistance;
+    
+    // Pre-determine moon data for more accurate spacing calculations
+    const planetMoonData = [];
+    for (let i = 0; i < numPlanets; i++) {
+        // Generate planet size first (inner planets smaller, outer planets can be larger)
+        let bias = Math.random();
+        const sizeMultiplier = 0.7 + (i * 0.15); // Inner planets smaller, outer planets larger
+        let radius = Math.floor((minRadius + (maxRadius - minRadius) * Math.pow(bias, 2)) * sizeMultiplier);
+        radius = Math.max(minRadius, Math.min(maxRadius, radius)); // Clamp to valid range
+        
+        // Pre-determine if this planet will have a moon and its properties
+        const willHaveMoon = Math.random() < 0.5; // 50% chance
+        let moonRadius = 0;
+        if (willHaveMoon) {
+            let moonBias = Math.random();
+            moonRadius = Math.floor(minMoonRadius + (maxMoonRadius - minMoonRadius) * Math.pow(moonBias, 2));
+        }
+        
+        planetMoonData.push({
+            radius: radius,
+            moonRadius: moonRadius,
+            willHaveMoon: willHaveMoon
+        });
+    }
+    
+    for (let i = 0; i < numPlanets; i++) {
+        const planetData = planetMoonData[i];
+        const radius = planetData.radius;
+        
+        // Calculate spacing based on this planet's TOTAL system mass (planet + moon if any)
+        const planetMass = radius * 0.5; // Same mass calculation as in Planet class
+        const moonMass = planetData.willHaveMoon ? planetData.moonRadius * 0.5 : 0;
+        const totalSystemMass = planetMass + moonMass; // Combined mass of planet-moon system
+        
+        // Calculate influence from all previously placed planets (including their moons)
+        let totalInfluence = totalSystemMass; // Start with current system's influence
+        let maxPreviousMass = 0;
+        
+        for (let j = 0; j < planets.length; j++) {
+            const prevPlanet = planets[j];
+            const distanceToPrev = currentOrbitDistance - Math.hypot(prevPlanet.x - star.x, prevPlanet.y - star.y);
+            
+            // Calculate the previous planet's total system mass (including its moon if any)
+            let prevSystemMass = prevPlanet.mass;
+            // Check if this previous planet has a moon (they're added to planets array after creation)
+            if (j < planetMoonData.length && planetMoonData[j].willHaveMoon) {
+                const prevMoonMass = planetMoonData[j].moonRadius * 0.5;
+                prevSystemMass += prevMoonMass;
+            }
+            
+            // Add influence based on total system mass and proximity (closer planets have more influence)
+            const proximityFactor = Math.max(0.1, 1 / Math.max(1, Math.abs(distanceToPrev) / 1000));
+            totalInfluence += prevSystemMass * proximityFactor;
+            maxPreviousMass = Math.max(maxPreviousMass, prevSystemMass);
+        }
+        
+        // Calculate spacing based on total gravitational influence (using combined mass)
+        const influenceBasedSpacing = baseOrbitSpacing + (totalInfluence * spacingMultiplier * 0.5);
+        
+        // Add minimum separation based on Hill sphere approximation (using total system mass)
+        const hillSphereRadius = Math.pow(totalSystemMass / (3 * star.mass), 1/3) * currentOrbitDistance;
+        const minimumSeparation = Math.max(hillSphereRadius * 3, radius * 3); // 3 Hill radii or 3 planet radii
+
+        // Use the larger of influence-based spacing or minimum separation
+        const finalSpacing = Math.max(influenceBasedSpacing, minimumSeparation);
+        
+        // Add some variation for natural look, but keep it smaller for stability
+        const distanceVariation = finalSpacing * 0.15; // 15% variation
+        const orbitalDistance = currentOrbitDistance + (Math.random() - 0.5) * distanceVariation;
+        
+        // Generate random angle around the star
+        const angle = Math.random() * Math.PI * 2;
+        
+        // Calculate planet position
+        let x = star.x + Math.cos(angle) * orbitalDistance;
+        let y = star.y + Math.sin(angle) * orbitalDistance;
+        
+        // Check if position conflicts with ship
+        let shipDist = Math.hypot(x - ship.worldX, y - ship.worldY);
+        if (shipDist < radius + Math.max(ship.width, ship.height) + 100) {
+            // If too close to ship, offset the angle by 90 degrees
+            const newAngle = angle + Math.PI / 2;
+            x = star.x + Math.cos(newAngle) * orbitalDistance;
+            y = star.y + Math.sin(newAngle) * orbitalDistance;
+        }
+        
+        // Create the planet using helper function
+        let newPlanet = createPlanetWithOrbit(x, y, radius);
+        planets.push(newPlanet);
+        
+        const dist = Math.hypot(x - star.x, y - star.y);
+        console.log(`Created planet ${i + 1} at orbital distance: ${dist.toFixed(0)} from star, planet mass: ${planetMass.toFixed(1)}, moon mass: ${moonMass.toFixed(1)}, total system mass: ${totalSystemMass.toFixed(1)}, influence: ${totalInfluence.toFixed(1)}, spacing: ${finalSpacing.toFixed(0)}`);
+        
+        // Update current orbit distance for next planet using the calculated spacing
+        currentOrbitDistance = orbitalDistance + finalSpacing;
+    }
+
+    // Create moons for planets using pre-determined data
+    let moonsCreated = 0;
+    const originalPlanetCount = planets.length; // Store count before adding moons
+    for (let i = 0; i < originalPlanetCount; i++) { // Only iterate through original planets
+        let planet = planets[i];
+        const planetData = planetMoonData[i];
+        
+        if (planetData.willHaveMoon) { // Use pre-determined moon data
+            console.log("Creating pre-determined moon for planet at:", planet.x, planet.y);
+            
+            // Use pre-determined moon radius
+            const moonRadius = planetData.moonRadius;
+            
+            // Position moon at a safe distance from the planet (outside planet radius + buffer)
+            const minDistance = planet.radius + moonRadius + 150; // Minimum safe distance
+            const maxDistance = planet.radius + moonRadius + 200; // Maximum distance for orbit
+            const moonDistance = minDistance + Math.random() * (maxDistance - minDistance);
+            
+            // Random angle around the planet
+            const moonAngle = Math.random() * Math.PI * 2;
+            
+            // Create the moon using helper function
+            let moon = createMoonWithOrbit(planet, moonRadius, moonDistance, moonAngle);
+            
+            // Add moon to planets array
+            planets.push(moon);
+            moonsCreated++;
+            console.log(`Created planet-moon system: Planet mass=${planet.mass.toFixed(1)}, Moon mass=${moon.mass.toFixed(1)}`);
+        }
+    }
+    
+    console.log(`Random generation complete: ${planets.length - moonsCreated} planets and ${moonsCreated} moons total: ${planets.length} celestial bodies`);
+}
+
+// Hard-coded solar system generation function
+function generateHardcodedSolarSystem() {
+    console.log("Generating hard-coded solar system...");
+    
+    // Initialize stars array with the main star
+    stars = [star];
+    
+    // === THE SOLACE SYSTEM ===
+    // Sun: Radius 600 (already created in setupGame), center of the solar system at (0, 0)
+    
+    // Planet 1: Radius 85, 4000 distance to star, orangePlanet image
+    let planet1 = createPlanetWithOrbit(star.x + 4000, star.y, 85, gallery.orangePlanet);
+    planets.push(planet1);
+    console.log("Created Planet 1: Troke at distance 4000 from Solace");
+    
+    // Planet 2: Radius 70, 12000 distance to star, tealGlade image (logo3), with moon
+    // This planet accounts for Planet 1's gravitational influence
+    const planet2 = new Planet(star.x + 12000, star.y, 70);
+    if (gallery.tealGlade) {
+        planet2.Image = gallery.tealGlade;
+    }
+    
+    // Calculate enhanced orbital velocity accounting for Planet 1's influence
+    const planet2Velocity = calculateMultiBodyOrbitalVelocity(
+        planet2.x, 
+        planet2.y, 
+        planet2.mass, 
+        star, 
+        [planet1] // Planet 1 affects Planet 2's orbit
+    );
+    
+    planet2.velocityX = planet2Velocity.planetVelX;
+    planet2.velocityY = planet2Velocity.planetVelY;
+    
+    // Apply counter-velocity to star (conservation of momentum)
+    star.velocityX += planet2Velocity.starVelX;
+    star.velocityY += planet2Velocity.starVelY;
+    
+    planets.push(planet2);
+    
+    // Planet 2 Moon: radius 40, 310 moon distance, grayPlanet moon image
+    // Calculate moon position at safe distance (planet radius + moon radius + specified distance)
+    const moonDistance = planet2.radius + 40 + 200; // 70 + 40 + 200 = 310 total distance
+    let moon2 = createMoonWithOrbit(planet2, 40, moonDistance, Math.PI/3, gallery.grayPlanet);
+    planets.push(moon2);
+    console.log("Created Planet 2: Teal Glade at distance 12000 from Solace with moon Roto");
+
+    // Planet 3: Radius 60, 25000 distance to star, harshPlanet image
+    // This planet accounts for Planet 1 and Planet 2's gravitational influence
+    const planet3 = new Planet(star.x + 25000, star.y, 60);
+    if (gallery.harshPlanet) {
+        planet3.Image = gallery.harshPlanet;
+    }
+    
+    // Calculate enhanced orbital velocity accounting for previous planets' influence
+    const planet3Velocity = calculateMultiBodyOrbitalVelocity(
+        planet3.x, 
+        planet3.y, 
+        planet3.mass, 
+        star, 
+        [planet1, planet2] // Both previous planets affect Planet 3's orbit
+    );
+    
+    planet3.velocityX = planet3Velocity.planetVelX;
+    planet3.velocityY = planet3Velocity.planetVelY;
+    
+    // Apply counter-velocity to star (conservation of momentum)
+    star.velocityX += planet3Velocity.starVelX;
+    star.velocityY += planet3Velocity.starVelY;
+    
+    planets.push(planet3);
+    console.log("Created Planet 3: Poltan at distance 25000 from Solace (with multi-body perturbations)");
+
+    // === BINARY STAR SYSTEM ===
+    // Binary star: Radius 150, 70000 distance to main star
+    const binaryStarX = star.x + 70000;
+    const binaryStarY = star.y;
+    let binaryStar = new Star(binaryStarX, binaryStarY, 150);
+    
+    // Calculate binary star orbital velocity around main star
+    const binaryVelocity = calculateOrbitalVelocity(binaryStarX, binaryStarY, binaryStar.mass, star.x, star.y, star.mass);
+    binaryStar.velocityX = binaryVelocity.planetVelX;
+    binaryStar.velocityY = binaryVelocity.planetVelY;
+    
+    // Apply counter-velocity to main star
+    star.velocityX += binaryVelocity.starVelX;
+    star.velocityY += binaryVelocity.starVelY;
+    
+    // Add binary star to stars array
+    stars.push(binaryStar);
+    console.log("Created Binary Star: Nemesis at distance 70000 from Solace");
+    
+    // Binary Planet B1: radius 55, 3000 distance to binary star, methanePlanet image
+    let planetB1 = createPlanetWithOrbit(binaryStarX + 3000, binaryStarY, 55, gallery.methanePlanet, binaryStar);
+    planets.push(planetB1);
+    console.log("Created Binary Planet B1: Chryse at distance 3000 from Nemesis");
+    
+    // Binary Planet B2: radius 50, 8000 distance to binary star, using redPlanet image
+    // This planet accounts for Planet B1's gravitational influence
+    const planetB2 = new Planet(binaryStarX + 8000, binaryStarY, 50);
+    if (gallery.redPlanet) {
+        planetB2.Image = gallery.redPlanet;
+    }
+    
+    // Calculate enhanced orbital velocity accounting for Planet B1's influence
+    const enhancedVelocity = calculateMultiBodyOrbitalVelocity(
+        planetB2.x, 
+        planetB2.y, 
+        planetB2.mass, 
+        binaryStar, 
+        [planetB1] // Planet B1 affects Planet B2's orbit
+    );
+    
+    planetB2.velocityX = enhancedVelocity.planetVelX;
+    planetB2.velocityY = enhancedVelocity.planetVelY;
+    
+    // Apply counter-velocity to binary star (conservation of momentum)
+    binaryStar.velocityX += enhancedVelocity.starVelX;
+    binaryStar.velocityY += enhancedVelocity.starVelY;
+    
+    planets.push(planetB2);
+    console.log("Created Binary Planet B2: Dead planet at distance 8000 from Nemesis (with B1 perturbation)");
+    
+    console.log(`Hard-coded generation complete: ${planets.length - 1} planets, 1 moon, and 1 binary star system`);
+    console.log(`Total celestial bodies: ${planets.length} planets/moons + 2 stars = ${planets.length + 2} objects`);
+}
 
 // Barnes-Hut algorithm constants
 const THETA = 0.5; // Approximation parameter for Barnes-Hut (0.5 is a good balance)
@@ -391,13 +825,12 @@ function drawRotatingBackgroundStars(playerAngle, canvasWidth, canvasHeight, ctx
     ctx.restore();
 }
 
-let ambience; // Will be initialized in window.onload
-
 // Save/Load system
 let savedState = null;
 
 // Currently selected planet
 let selectedPlanet = null;
+let autoRotationEnabled = false;
 
 // Save/Load system functions
 function saveGameState() {
@@ -442,13 +875,15 @@ function saveGameState() {
             angle: comet.angle
         })),
         
-        // Save star state (in case it ever changes)
-        star: {
-            x: star.x,
-            y: star.y,
-            radius: star.radius,
-            mass: star.mass
-        },
+        // Save all stars (main star and binary stars)
+        stars: stars.map(starObj => ({
+            x: starObj.x,
+            y: starObj.y,
+            velocityX: starObj.velocityX || 0,
+            velocityY: starObj.velocityY || 0,
+            radius: starObj.radius,
+            mass: starObj.mass
+        })),
         
         // Save particle states
         globalIonParticles: globalIonParticles.map(particle => ({
@@ -502,7 +937,7 @@ function saveGameState() {
     };
     
     console.log("Game state saved successfully!");
-    console.log(`Saved: ${savedState.planets.length} planets, ${savedState.comets.length} comets, ${savedState.globalIonParticles.length} ion particles, ${savedState.globalDustParticles.length} dust particles, ${savedState.globalThrusterParticles.length} thruster particles`);
+    console.log(`Saved: ${savedState.stars.length} stars, ${savedState.planets.length} planets, ${savedState.comets.length} comets, ${savedState.globalIonParticles.length} ion particles, ${savedState.globalDustParticles.length} dust particles, ${savedState.globalThrusterParticles.length} thruster particles`);
     
     // Also save to localStorage for persistence
     try {
@@ -546,11 +981,29 @@ function loadGameState() {
     ship.health = savedState.ship.health;
     ship.thrust = savedState.ship.thrust;
     
-    // Restore star state
-    star.x = savedState.star.x;
-    star.y = savedState.star.y;
-    star.radius = savedState.star.radius;
-    star.mass = savedState.star.mass;
+    // Restore all stars
+    if (savedState.stars) {
+        // New save format with stars array
+        stars = savedState.stars.map(starData => {
+            const starObj = new Star(starData.x, starData.y, starData.radius);
+            starObj.velocityX = starData.velocityX || 0;
+            starObj.velocityY = starData.velocityY || 0;
+            starObj.mass = starData.mass;
+            return starObj;
+        });
+        // Set the main star reference to the first star
+        star = stars[0];
+    } else {
+        // Fallback for old save format with single star
+        star.x = savedState.star.x;
+        star.y = savedState.star.y;
+        star.radius = savedState.star.radius;
+        star.mass = savedState.star.mass;
+        star.velocityX = 0;
+        star.velocityY = 0;
+        // Rebuild stars array with just the main star
+        stars = [star];
+    }
     
     // Restore planets
     planets = savedState.planets.map(planetData => {
@@ -642,7 +1095,7 @@ function loadGameState() {
     }) : []; // Handle case where old saves don't have thruster particles
     
     console.log("Game state loaded successfully!");
-    console.log(`Loaded: ${planets.length} planets, ${comets.length} comets, ${globalIonParticles.length} ion particles, ${globalDustParticles.length} dust particles, ${globalThrusterParticles.length} thruster particles`);
+    console.log(`Loaded: ${stars.length} stars, ${planets.length} planets, ${comets.length} comets, ${globalIonParticles.length} ion particles, ${globalDustParticles.length} dust particles, ${globalThrusterParticles.length} thruster particles`);
     
     const saveTime = new Date(savedState.timestamp);
     console.log(`Save was created on: ${saveTime.toLocaleString()}`);
@@ -777,7 +1230,7 @@ let gameStarted = false;
 
 // Start the loading process when the page loads
 window.onload = () => {
-    // Initialize gallery and ambience objects after DOM is loaded
+    // Initialize gallery objects after DOM is loaded
     gallery = {
         shipNorth: document.getElementById("shipNorth"),
         shipSouth: document.getElementById("shipSouth"),
@@ -817,10 +1270,30 @@ window.onload = () => {
         toxicPlanet: document.getElementById("toxicPlanet"),
         veilPlanet: document.getElementById("veilPlanet"),
         weirdPlanet: document.getElementById("weirdPlanet"),
-        yellowStar: document.getElementById("yellowStar")
+        yellowStar: document.getElementById("yellowStar"),
+        redStar: document.getElementById("redStar"),
+        tealGlade: document.getElementById("logo3")
     };
     
-    ambience = document.getElementById("frozenPlanetAmbience");
+    // Initialize radio sounds gallery for the radio system
+    radioSounds = {
+        // Planet radio signals - each planet will have a unique audio signature
+        trokeRadio: document.getElementById("trokeRadio"),
+        homeRadio: document.getElementById("homeRadio"),
+        poltanRadio: document.getElementById("poltanRadio"),
+        chryseRadio: document.getElementById("chryseRadio"),
+        dwarmRadio: document.getElementById("dwarmRadio"),
+
+        // Star radio signals
+        solaceRadio: document.getElementById("solaceRadio"),
+        nemesisRadio: document.getElementById("nemesisRadio"),
+        
+        // Comet radio signals (can be randomized or generic)
+        cometRadio: document.getElementById("cometRadio"),
+        
+        // Background static/noise
+        radioStatic: document.getElementById("radioStatic")
+    };
     
     // Initialize alternate view instance
     alternateView = new AlternateView();
@@ -896,221 +1369,16 @@ function setupGame() {
     // Generate background stars
     generateBackgroundStars();
 
-    let minRadius = 50;
-    let maxRadius = 200;
-    let minMoonRadius = 30;
-    let maxMoonRadius = 50;
-
-    // Generate planets in orbital order from star outward
-    const numPlanets = 5;
-    const minOrbitDistance = star.radius + 3000; // Starting distance from star
-    const baseOrbitSpacing = 2500; // Base spacing between orbits
-    const spacingMultiplier = 15; // How much planet size affects spacing
-    
-    let currentOrbitDistance = minOrbitDistance;
-    
-    // Pre-determine moon data for more accurate spacing calculations
-    const planetMoonData = [];
-    for (let i = 0; i < numPlanets; i++) {
-        // Generate planet size first (inner planets smaller, outer planets can be larger)
-        let bias = Math.random();
-        const sizeMultiplier = 0.7 + (i * 0.15); // Inner planets smaller, outer planets larger
-        let radius = Math.floor((minRadius + (maxRadius - minRadius) * Math.pow(bias, 2)) * sizeMultiplier);
-        radius = Math.max(minRadius, Math.min(maxRadius, radius)); // Clamp to valid range
-        
-        // Pre-determine if this planet will have a moon and its properties
-        const willHaveMoon = Math.random() < 0.5; // 50% chance
-        let moonRadius = 0;
-        if (willHaveMoon) {
-            let moonBias = Math.random();
-            moonRadius = Math.floor(minMoonRadius + (maxMoonRadius - minMoonRadius) * Math.pow(moonBias, 2));
-        }
-        
-        planetMoonData.push({
-            radius: radius,
-            moonRadius: moonRadius,
-            willHaveMoon: willHaveMoon
-        });
+    // Generate solar system based on configuration
+    if (SOLAR_SYSTEM_TYPE === 'random') {
+        generateRandomSolarSystem();
+    } else if (SOLAR_SYSTEM_TYPE === 'hardcoded') {
+        generateHardcodedSolarSystem();
+    } else {
+        console.error("Invalid SOLAR_SYSTEM_TYPE:", SOLAR_SYSTEM_TYPE);
+        // Fallback to random generation
+        generateRandomSolarSystem();
     }
-    
-    for (let i = 0; i < numPlanets; i++) {
-        const planetData = planetMoonData[i];
-        const radius = planetData.radius;
-        
-        // Calculate spacing based on this planet's TOTAL system mass (planet + moon if any)
-        const planetMass = radius * 0.5; // Same mass calculation as in Planet class
-        const moonMass = planetData.willHaveMoon ? planetData.moonRadius * 0.5 : 0;
-        const totalSystemMass = planetMass + moonMass; // Combined mass of planet-moon system
-        
-        // Calculate influence from all previously placed planets (including their moons)
-        let totalInfluence = totalSystemMass; // Start with current system's influence
-        let maxPreviousMass = 0;
-        
-        for (let j = 0; j < planets.length; j++) {
-            const prevPlanet = planets[j];
-            const distanceToPrev = currentOrbitDistance - Math.hypot(prevPlanet.x - star.x, prevPlanet.y - star.y);
-            
-            // Calculate the previous planet's total system mass (including its moon if any)
-            let prevSystemMass = prevPlanet.mass;
-            // Check if this previous planet has a moon (they're added to planets array after creation)
-            if (j < planetMoonData.length && planetMoonData[j].willHaveMoon) {
-                const prevMoonMass = planetMoonData[j].moonRadius * 0.5;
-                prevSystemMass += prevMoonMass;
-            }
-            
-            // Add influence based on total system mass and proximity (closer planets have more influence)
-            const proximityFactor = Math.max(0.1, 1 / Math.max(1, Math.abs(distanceToPrev) / 1000));
-            totalInfluence += prevSystemMass * proximityFactor;
-            maxPreviousMass = Math.max(maxPreviousMass, prevSystemMass);
-        }
-        
-        // Calculate spacing based on total gravitational influence (using combined mass)
-        const influenceBasedSpacing = baseOrbitSpacing + (totalInfluence * spacingMultiplier * 0.5);
-        
-        // Add minimum separation based on Hill sphere approximation (using total system mass)
-        const hillSphereRadius = Math.pow(totalSystemMass / (3 * star.mass), 1/3) * currentOrbitDistance;
-        const minimumSeparation = Math.max(hillSphereRadius * 3, radius * 3); // 3 Hill radii or 3 planet radii
-
-        // Use the larger of influence-based spacing or minimum separation
-        const finalSpacing = Math.max(influenceBasedSpacing, minimumSeparation);
-        
-        // Add some variation for natural look, but keep it smaller for stability
-        const distanceVariation = finalSpacing * 0.15; // 15% variation
-        const orbitalDistance = currentOrbitDistance + (Math.random() - 0.5) * distanceVariation;
-        
-        // Generate random angle around the star
-        const angle = Math.random() * Math.PI * 2;
-        
-        // Calculate planet position
-        const x = star.x + Math.cos(angle) * orbitalDistance;
-        const y = star.y + Math.sin(angle) * orbitalDistance;
-        
-        // Check if position conflicts with ship
-        let shipDist = Math.hypot(x - ship.worldX, y - ship.worldY);
-        if (shipDist < radius + Math.max(ship.width, ship.height) + 100) {
-            // If too close to ship, offset the angle by 90 degrees
-            const newAngle = angle + Math.PI / 2;
-            const newX = star.x + Math.cos(newAngle) * orbitalDistance;
-            const newY = star.y + Math.sin(newAngle) * orbitalDistance;
-            
-            // Update position
-            const finalX = newX;
-            const finalY = newY;
-            
-            // Create the planet with final position
-            const dx = finalX - star.x;
-            const dy = finalY - star.y;
-            const dist = Math.sqrt(dx * dx + dy * dy);
-            
-            // Calculate orbital velocity
-            const orbitalSpeed = Math.sqrt(G * star.mass / dist);
-            const perpX = -dy / dist;
-            const perpY = dx / dist;
-            
-            let newPlanet = new Planet(finalX, finalY, radius);
-            newPlanet.velocityX = perpX * orbitalSpeed;
-            newPlanet.velocityY = perpY * orbitalSpeed;
-            planets.push(newPlanet);
-            console.log(`Created planet ${i + 1} at orbital distance: ${dist.toFixed(0)} from star (adjusted for ship), planet mass: ${planetMass.toFixed(1)}, moon mass: ${moonMass.toFixed(1)}, total system mass: ${totalSystemMass.toFixed(1)}, influence: ${totalInfluence.toFixed(1)}, spacing: ${finalSpacing.toFixed(0)}`);
-        } else {
-            // Create planet at original position
-            const dx = x - star.x;
-            const dy = y - star.y;
-            const dist = Math.sqrt(dx * dx + dy * dy);
-            
-            // Calculate orbital velocity
-            const orbitalSpeed = Math.sqrt(G * star.mass / dist);
-            const perpX = -dy / dist;
-            const perpY = dx / dist;
-            
-            let newPlanet = new Planet(x, y, radius);
-            newPlanet.velocityX = perpX * orbitalSpeed;
-            newPlanet.velocityY = perpY * orbitalSpeed;
-            planets.push(newPlanet);
-            console.log(`Created planet ${i + 1} at orbital distance: ${dist.toFixed(0)} from star, planet mass: ${planetMass.toFixed(1)}, moon mass: ${moonMass.toFixed(1)}, total system mass: ${totalSystemMass.toFixed(1)}, influence: ${totalInfluence.toFixed(1)}, spacing: ${finalSpacing.toFixed(0)}`);
-        }
-        
-        // Update current orbit distance for next planet using the calculated spacing
-        currentOrbitDistance = orbitalDistance + finalSpacing;
-    }
-
-    // Create moons for planets using pre-determined data (store original planet count to avoid processing newly added moons)
-    let moonsCreated = 0;
-    const originalPlanetCount = planets.length; // Store count before adding moons
-    for (let i = 0; i < originalPlanetCount; i++) { // Only iterate through original planets
-        let planet = planets[i];
-        const planetData = planetMoonData[i];
-        
-        if (planetData.willHaveMoon) { // Use pre-determined moon data
-            console.log("Creating pre-determined moon for planet at:", planet.x, planet.y);
-            
-            // Use pre-determined moon radius
-            const moonRadius = planetData.moonRadius;
-            
-            // Position moon at a safe distance from the planet (outside planet radius + buffer)
-            const minDistance = planet.radius + moonRadius + 150; // Minimum safe distance
-            const maxDistance = planet.radius + moonRadius + 200; // Maximum distance for orbit
-            const moonDistance = minDistance + Math.random() * (maxDistance - minDistance);
-            
-            // Random angle around the planet
-            const moonAngle = Math.random() * Math.PI * 2;
-            const moonX = planet.x + Math.cos(moonAngle) * moonDistance;
-            const moonY = planet.y + Math.sin(moonAngle) * moonDistance;
-            
-            // Create the moon
-            let moon = new Planet(moonX, moonY, moonRadius);
-            
-            // --- Calculate proper orbital mechanics for planet-moon system ---
-            
-            // Calculate masses
-            const planetMass = planet.mass;
-            const moonMass = moon.mass;
-            const totalMass = planetMass + moonMass;
-            
-            // Calculate center of mass (barycenter) of planet-moon system
-            const barycenterX = (planet.x * planetMass + moonX * moonMass) / totalMass;
-            const barycenterY = (planet.y * planetMass + moonY * moonMass) / totalMass;
-            
-            // Distance from star to barycenter
-            const barycenterDistFromStar = Math.hypot(barycenterX - star.x, barycenterY - star.y);
-            
-            // Calculate the orbital velocity that the barycenter should have around the star
-            const barycenterOrbitalSpeed = Math.sqrt(G * star.mass / barycenterDistFromStar);
-            const barycenterTangentX = -(barycenterY - star.y) / barycenterDistFromStar;
-            const barycenterTangentY = (barycenterX - star.x) / barycenterDistFromStar;
-            const barycenterVelX = barycenterTangentX * barycenterOrbitalSpeed;
-            const barycenterVelY = barycenterTangentY * barycenterOrbitalSpeed;
-            
-            // Calculate reduced mass and orbital parameters for planet-moon system
-            const planetDistFromBarycenter = moonMass * moonDistance / totalMass;
-            const moonDistFromBarycenter = planetMass * moonDistance / totalMass;
-            
-            // Calculate orbital speeds around barycenter with stability correction
-            const planetOrbitalSpeed = Math.sqrt(G * moonMass * moonMass / (totalMass * moonDistance));
-            const moonOrbitalSpeed = Math.sqrt(G * planetMass * planetMass / (totalMass * moonDistance));
-            
-            // Calculate directions perpendicular to planet-moon line
-            const perpX = -Math.sin(moonAngle);
-            const perpY = Math.cos(moonAngle);
-            
-            // Set velocities: barycenter motion + orbital motion around barycenter
-            planet.velocityX = barycenterVelX - perpX * planetOrbitalSpeed;
-            planet.velocityY = barycenterVelY - perpY * planetOrbitalSpeed;
-            
-            moon.velocityX = barycenterVelX + perpX * moonOrbitalSpeed;
-            moon.velocityY = barycenterVelY + perpY * moonOrbitalSpeed;
-            
-            // Add moon to planets array
-            planets.push(moon);
-            moonsCreated++;
-            console.log(`Created planet-moon system:`);
-            console.log(`  Planet: mass=${planetMass.toFixed(1)}, distance from barycenter=${planetDistFromBarycenter.toFixed(1)}`);
-            console.log(`  Moon: mass=${moonMass.toFixed(1)}, distance from barycenter=${moonDistFromBarycenter.toFixed(1)}`);
-            console.log(`  Barycenter orbital speed: ${barycenterOrbitalSpeed.toFixed(2)}`);
-        }
-    }
-    
-    console.log(`Created ${planets.length - moonsCreated} planets and ${moonsCreated} moons total: ${planets.length} celestial bodies`);
 
     // Check for existing save data
     checkForSavedData();
@@ -1124,12 +1392,13 @@ function setupGame() {
         const mouseX = e.clientX - rect.left;
         const mouseY = e.clientY - rect.top;
 
-        for (let hitbox of radarPlanetHitboxes) {
+        for (let hitbox of radarCelestialHitboxes) {
             const dx = mouseX - hitbox.x;
             const dy = mouseY - hitbox.y;
             if (dx * dx + dy * dy <= hitbox.r * hitbox.r) {
-                selectedPlanet = hitbox.planet; // <-- Set selected planet
-                console.log("Clicked planet:", hitbox.planet);
+                selectedPlanet = hitbox.object; // Set selected object (planet, comet, or star)
+                autoRotationEnabled = true; // Enable auto-rotation for newly selected object
+                console.log(`Clicked ${hitbox.type}:`, hitbox.object);
                 break;
             }
         }
@@ -1140,7 +1409,7 @@ function setupGame() {
         if (comets.length < maxComets) {
             spawnComet();
         }
-    }, 10000); // 10 seconds
+    }, 1000); // 1 second
 }
 
 // Function to start the game when the user clicks
@@ -1158,12 +1427,6 @@ function startGame() {
     
     // Hide title screen
     document.getElementById("titleScreen").style.display = "none";
-
-    // Start audio
-    ambience.volume = 0.5;
-    ambience.play().catch(err => {
-        console.warn("Audio blocked or failed:", err);
-    });
     
     // Start the game loop
     draw();
@@ -1188,8 +1451,20 @@ function loadAssets() {
             gallery.cometImg
         ];
         
+        const audioToLoad = [
+            radioSounds.trokeRadio,
+            radioSounds.homeRadio,
+            radioSounds.poltanRadio,
+            radioSounds.chryseRadio,
+            radioSounds.dwarmRadio,
+            radioSounds.solaceRadio,
+            radioSounds.nemesisRadio,
+            radioSounds.cometRadio,
+            radioSounds.radioStatic
+        ].filter(audio => audio); // Filter out any undefined audio elements
+        
         let loadedCount = 0;
-        const totalAssets = imagesToLoad.length + 1; // +1 for audio
+        const totalAssets = imagesToLoad.length + audioToLoad.length;
         
         function updateProgress() {
             loadedCount++;
@@ -1217,16 +1492,20 @@ function loadAssets() {
             }
         });
         
-        // Load audio
-        if (ambience.readyState >= 3) {
-            updateProgress();
-        } else {
-            ambience.oncanplaythrough = updateProgress;
-            ambience.onerror = () => {
-                console.warn("Failed to load audio");
-                updateProgress(); // Continue even if audio fails
-            };
-        }
+        // Load audio files
+        audioToLoad.forEach(audio => {
+            if (audio.readyState >= 3) { // HAVE_FUTURE_DATA or better
+                updateProgress();
+            } else {
+                audio.oncanplaythrough = updateProgress;
+                audio.onerror = () => {
+                    console.error("Failed to load audio:", audio.src);
+                    updateProgress(); // Continue loading even if one audio fails
+                };
+                // Trigger loading
+                audio.load();
+            }
+        });
     });
 }
 
@@ -1251,78 +1530,23 @@ function draw() {
         canvas.height / 2 - ship.worldY
     );
 
-    // --- Gravity from star to ship ---
-    {
-        const dx = star.x - ship.worldX;
-        const dy = star.y - ship.worldY;
+    // --- Gravity from all bodies to ship (one-way to prevent ship from affecting large body orbits) ---
+    // Apply gravity from ALL stars
+    for (let starBody of stars) {
+        const dx = starBody.x - ship.worldX;
+        const dy = starBody.y - ship.worldY;
         const distSq = dx * dx + dy * dy;
         const dist = Math.sqrt(distSq);
-        const minDist = star.radius; // Prevents infinite force near center
+        const minDist = starBody.radius; // Prevents infinite force near center
 
         if (dist > minDist) {
-            const force = G * star.mass / distSq;
+            const force = G * starBody.mass / distSq;
             ship.velocityX += (dx / dist) * force;
             ship.velocityY += (dy / dist) * force;
         }
     }
 
-    // --- Gravity from star to planets ---
-    for (let planet of planets) {
-        const dx = star.x - planet.x;
-        const dy = star.y - planet.y;
-        const distSq = dx * dx + dy * dy;
-        const dist = Math.sqrt(distSq);
-        const minDist = star.radius + planet.radius;
-
-        if (dist > minDist) {
-            const force = G * star.mass / distSq;
-            planet.velocityX += (dx / dist) * force;
-            planet.velocityY += (dy / dist) * force;
-        }
-    }
-
-    // --- Planet-planet gravity using Barnes-Hut algorithm for optimization ---
-    // Calculate forces using Barnes-Hut algorithm for all planets simultaneously
-    const planetBodies = planets.map(planet => ({
-        x: planet.x,
-        y: planet.y,
-        mass: planet.mass,
-        radius: planet.radius,
-        planet: planet // Reference to original planet object
-    }));
-    
-    const barnesHutForces = calculateBarnesHutForces(planetBodies);
-    
-    // Apply forces and update positions using smaller timesteps for stability
-    const numSubSteps = 4; // Subdivide physics timestep
-    const subTimeStep = 1.0 / numSubSteps;
-    
-    for (let subStep = 0; subStep < numSubSteps; subStep++) {
-        for (let i = 0; i < planets.length; i++) {
-            let planet = planets[i];
-            const force = barnesHutForces[i];
-            
-            // Apply Barnes-Hut calculated forces
-            planet.velocityX += force.fx * subTimeStep;
-            planet.velocityY += force.fy * subTimeStep;
-            
-            // Update position with smaller timestep
-            planet.x += planet.velocityX * subTimeStep;
-            planet.y += planet.velocityY * subTimeStep;
-        }
-    }
-    
-    // Update planets (for trail recording and other planet-specific updates)
-    for (let planet of planets) {
-        planet.update();
-    }
-    
-    // Show all planets
-    for (let planet of planets) {
-        planet.show();
-    }
-
-    // --- One-way gravity from planets to ship (prevents orbital decay) ---
+    // Apply gravity from planets to ship
     for (let planet of planets) {
         const dx = planet.x - ship.worldX;
         const dy = planet.y - ship.worldY;
@@ -1336,36 +1560,86 @@ function draw() {
             // Only apply force to ship, not back to planet (one-way gravity)
             ship.velocityX += (dx / dist) * force;
             ship.velocityY += (dy / dist) * force;
-            // Note: No corresponding force applied to planet to prevent orbital decay
         }
     }
 
-    // --- Comet physics ---
-    // Calculate forces from planets to comets using Barnes-Hut (if there are planets and comets)
-    if (comets.length > 0 && planets.length > 0) {
-        const planetBodies = planets.map(planet => ({
+    // --- Planet-planet gravity using Barnes-Hut algorithm for optimization ---
+    // Include ALL stars in the n-body system for realistic gravitational dynamics
+    const allBodies = [
+        // Add all stars as gravitational bodies
+        ...stars.map(starBody => ({
+            x: starBody.x,
+            y: starBody.y,
+            mass: starBody.mass,
+            radius: starBody.radius,
+            object: starBody,
+            type: 'star'
+        })),
+        // Add all planets
+        ...planets.map(planet => ({
             x: planet.x,
             y: planet.y,
             mass: planet.mass,
-            radius: planet.radius
-        }));
+            radius: planet.radius,
+            object: planet,
+            type: 'planet'
+        }))
+    ];
+    
+    const barnesHutForces = calculateBarnesHutForces(allBodies);
+    
+    // Apply forces and update positions using smaller timesteps for stability
+    const numSubSteps = 4; // Subdivide physics timestep
+    const subTimeStep = 1.0 / numSubSteps;
+    
+    for (let subStep = 0; subStep < numSubSteps; subStep++) {
+        for (let i = 0; i < allBodies.length; i++) {
+            const body = allBodies[i];
+            const force = barnesHutForces[i];
+            
+            // Apply Barnes-Hut calculated forces
+            body.object.velocityX += force.fx * subTimeStep;
+            body.object.velocityY += force.fy * subTimeStep;
+            
+            // Update position with smaller timestep
+            body.object.x += body.object.velocityX * subTimeStep;
+            body.object.y += body.object.velocityY * subTimeStep;
+        }
+    }
+    
+    // Update planets (for trail recording and other planet-specific updates)
+    for (let planet of planets) {
+        planet.update();
+    }
+    
+    // Show all planets
+    for (let planet of planets) {
+        planet.show();
+    }
+
+    // --- Comet physics ---
+    // Calculate forces from all bodies to comets using Barnes-Hut (if there are comets)
+    if (comets.length > 0) {
+        // Include ALL stars and planets in the gravitational calculations for comets
+        const allBodiesForComets = [
+            // Add all stars
+            ...stars.map(starBody => ({
+                x: starBody.x,
+                y: starBody.y,
+                mass: starBody.mass,
+                radius: starBody.radius
+            })),
+            // Add all planets
+            ...planets.map(planet => ({
+                x: planet.x,
+                y: planet.y,
+                mass: planet.mass,
+                radius: planet.radius
+            }))
+        ];
         
         for (let comet of comets) {
-            // Gravity from star
-            {
-                const dx = star.x - comet.x;
-                const dy = star.y - comet.y;
-                const distSq = dx * dx + dy * dy;
-                const dist = Math.sqrt(distSq);
-                const minDist = star.radius + comet.radius;
-                if (dist > minDist) {
-                    const force = G * star.mass / distSq;
-                    comet.velocityX += (dx / dist) * force;
-                    comet.velocityY += (dy / dist) * force;
-                }
-            }
-            
-            // Gravity from planets using Barnes-Hut approximation
+            // Use Barnes-Hut approximation for all gravitational bodies
             const cometBody = {
                 x: comet.x,
                 y: comet.y,
@@ -1373,11 +1647,11 @@ function draw() {
                 radius: comet.radius
             };
             
-            // Build a temporary quad tree just for this comet's force calculation
-            let minX = Math.min(comet.x, ...planetBodies.map(p => p.x));
-            let minY = Math.min(comet.y, ...planetBodies.map(p => p.y));
-            let maxX = Math.max(comet.x, ...planetBodies.map(p => p.x));
-            let maxY = Math.max(comet.y, ...planetBodies.map(p => p.y));
+            // Build a temporary quad tree for this comet's force calculation
+            let minX = Math.min(comet.x, ...allBodiesForComets.map(p => p.x));
+            let minY = Math.min(comet.y, ...allBodiesForComets.map(p => p.y));
+            let maxX = Math.max(comet.x, ...allBodiesForComets.map(p => p.x));
+            let maxY = Math.max(comet.y, ...allBodiesForComets.map(p => p.y));
             
             const padding = 1000;
             const bounds = {
@@ -1388,8 +1662,8 @@ function draw() {
             };
             
             const cometQuadTree = new QuadTree(bounds);
-            for (let planetBody of planetBodies) {
-                cometQuadTree.insert(planetBody);
+            for (let body of allBodiesForComets) {
+                cometQuadTree.insert(body);
             }
             
             const cometForce = { fx: 0, fy: 0 };
@@ -1398,23 +1672,6 @@ function draw() {
             comet.velocityX += cometForce.fx;
             comet.velocityY += cometForce.fy;
             
-            comet.update();
-            comet.show();
-        }
-    } else {
-        // Fallback for when there are no planets or comets
-        for (let comet of comets) {
-            // Gravity from star only
-            const dx = star.x - comet.x;
-            const dy = star.y - comet.y;
-            const distSq = dx * dx + dy * dy;
-            const dist = Math.sqrt(distSq);
-            const minDist = star.radius + comet.radius;
-            if (dist > minDist) {
-                const force = G * star.mass / distSq;
-                comet.velocityX += (dx / dist) * force;
-                comet.velocityY += (dy / dist) * force;
-            }
             comet.update();
             comet.show();
         }
@@ -1503,8 +1760,10 @@ function draw() {
     updateGlobalParticles();
     showGlobalParticles();
 
-    // Draw the star at the center of the world
-    star.show();
+    // Draw ALL stars in the system
+    for (let starBody of stars) {
+        starBody.show();
+    }
 
     ctx.restore();
     ship.show();
@@ -1689,9 +1948,46 @@ function draw() {
     }
 
     // Ship controls
-    // WASD / arrow keys for movement
-    if (keys["a"] || keys["ArrowLeft"]) ship.angularVelocity -= ship.rotationSpeed * ship.rotationSpeedMultiplier;
-    if (keys["d"] || keys["ArrowRight"]) ship.angularVelocity += ship.rotationSpeed * ship.rotationSpeedMultiplier;
+    // Check for manual rotation input first
+    const manualRotationInput = keys["a"] || keys["ArrowLeft"] || keys["d"] || keys["ArrowRight"];
+    
+    if (manualRotationInput) {
+        // Manual input detected - disable auto-rotation permanently until new planet selected
+        autoRotationEnabled = false;
+        
+        // Apply manual rotation control
+        if (keys["a"] || keys["ArrowLeft"]) ship.angularVelocity -= ship.rotationSpeed * ship.rotationSpeedMultiplier;
+        if (keys["d"] || keys["ArrowRight"]) ship.angularVelocity += ship.rotationSpeed * ship.rotationSpeedMultiplier;
+    } else if (selectedPlanet && autoRotationEnabled) {
+        // Auto-rotation to selected planet (only when enabled and no manual input)
+        // Calculate angle to selected planet
+        const dx = selectedPlanet.x - ship.worldX;
+        const dy = selectedPlanet.y - ship.worldY;
+        const targetAngle = Math.atan2(dx, -dy); // Note: inverted Y for canvas coordinates
+        
+        // Calculate shortest angular difference
+        let angleDiff = targetAngle - ship.angle;
+        
+        // Normalize angle difference to [-π, π]
+        while (angleDiff > Math.PI) angleDiff -= 2 * Math.PI;
+        while (angleDiff < -Math.PI) angleDiff += 2 * Math.PI;
+        
+        // Apply smooth rotation towards target or lock when close enough
+        const rotationThreshold = 0.05; // Lock angle when this close (about 3 degrees)
+        if (Math.abs(angleDiff) > rotationThreshold) {
+            // Apply smooth rotation when far from target
+            const rotationForce = ship.rotationSpeed * ship.rotationSpeedMultiplier * 0.7; // Slightly gentler than manual
+            if (angleDiff > 0) {
+                ship.angularVelocity += rotationForce;
+            } else {
+                ship.angularVelocity -= rotationForce;
+            }
+        } else {
+            // Lock to target angle when close enough for precise targeting
+            ship.angle = targetAngle;
+            ship.angularVelocity = 0; // Stop any residual rotation
+        }
+    }
     if (keys["w"] || keys["ArrowUp"]) {
         if (ship.fuel <= 0) {
             ship.fuel = 0;
@@ -1790,7 +2086,7 @@ function draw() {
     hudCtx.fillRect(radarX, radarY, radarSize, radarSize);
 
     // Before drawing planets on radar, clear hitboxes
-    radarPlanetHitboxes = [];
+    radarCelestialHitboxes = [];
 
     // Draw planet trails on radar (before drawing current positions)
     if (showTrails) {
@@ -1861,7 +2157,7 @@ function draw() {
             // Only check for collisions once per second to improve performance and accuracy
             const currentTime = Date.now();
             if (currentTime - lastCollisionCheck > collisionCheckInterval) {
-                cachedPlanetPaths = predictAllPlanetOrbits(planets, star, radarSteps, timeStep);
+                cachedPlanetPaths = predictAllPlanetOrbits(planets, stars, radarSteps, timeStep);
                 const collisionData = detectPlanetCollisions(cachedPlanetPaths, planets);
                 globalCollisionData = collisionData; // Store globally for HUD display
                 lastCollisionCheck = currentTime;
@@ -1869,7 +2165,7 @@ function draw() {
             }
             
             // Use cached planet paths if available, otherwise calculate fresh ones
-            const planetPaths = cachedPlanetPaths.length > 0 ? cachedPlanetPaths : predictAllPlanetOrbits(planets, star, radarSteps, timeStep);
+            const planetPaths = cachedPlanetPaths.length > 0 ? cachedPlanetPaths : predictAllPlanetOrbits(planets, stars, radarSteps, timeStep);
             
             for (let planetIndex = 0; planetIndex < planets.length; planetIndex++) {
                 const path = planetPaths[planetIndex];
@@ -1957,7 +2253,7 @@ function draw() {
             globalCollisionData = []; // Clear collision data when disabled
             cachedPlanetPaths = []; // Clear cached paths when disabled
             for (let planet of planets) {
-                const path = predictOrbit(planet, planets, star, radarSteps, timeStep);
+                const path = predictOrbit(planet, planets, stars, radarSteps, timeStep);
                 hudCtx.save();
                 hudCtx.strokeStyle = "#fff";
                 hudCtx.globalAlpha = 0.9;
@@ -1995,7 +2291,7 @@ function draw() {
         // Only calculate ship path once per second to improve performance
         const currentTime = Date.now();
         if (currentTime - lastShipPathCheck > shipPathCheckInterval) {
-            cachedShipPath = predictShipTrajectory(ship, planets, star, radarSteps, timeStep);
+            cachedShipPath = predictShipTrajectory(ship, planets, stars, radarSteps, timeStep);
             lastShipPathCheck = currentTime;
         }
         
@@ -2059,8 +2355,9 @@ function draw() {
             const hitboxBuffer = 5; // Buffer for hitbox detection
 
             // Store hitbox for click detection
-            radarPlanetHitboxes.push({
-                planet: planet,
+            radarCelestialHitboxes.push({
+                object: planet,
+                type: 'planet',
                 x: rx,
                 y: ry,
                 r: r + hitboxBuffer
@@ -2068,17 +2365,31 @@ function draw() {
         }
     }
 
-    // Draw star on radar
-    const starRx = radarX + radarSize / 2 + (star.x - ship.worldX) * radarScale;
-    const starRy = radarY + radarSize / 2 + (star.y - ship.worldY) * radarScale;
-    if (
-        starRx >= radarX && starRx <= radarX + radarSize &&
-        starRy >= radarY && starRy <= radarY + radarSize
-    ) {
-        hudCtx.beginPath();
-        hudCtx.arc(starRx, starRy, Math.max(2, star.radius * radarScale), 0, Math.PI * 2);
-        hudCtx.fillStyle = "#ff0";
-        hudCtx.fill();
+    // Draw ALL stars on radar
+    for (let starBody of stars) {
+        const starRx = radarX + radarSize / 2 + (starBody.x - ship.worldX) * radarScale;
+        const starRy = radarY + radarSize / 2 + (starBody.y - ship.worldY) * radarScale;
+        const starR = Math.max(2, starBody.radius * radarScale);
+        if (
+            starRx >= radarX && starRx <= radarX + radarSize &&
+            starRy >= radarY && starRy <= radarY + radarSize
+        ) {
+            hudCtx.beginPath();
+            hudCtx.arc(starRx, starRy, starR, 0, Math.PI * 2);
+            hudCtx.fillStyle = "#ff0";
+            hudCtx.fill();
+            
+            const hitboxBuffer = 5; // Buffer for hitbox detection
+            
+            // Store hitbox for click detection
+            radarCelestialHitboxes.push({
+                object: starBody,
+                type: 'star',
+                x: starRx,
+                y: starRy,
+                r: starR + hitboxBuffer
+            });
+        }
     }
 
     // Draw comets on radar
@@ -2087,14 +2398,26 @@ function draw() {
         const dy = comet.y - ship.worldY;
         const rx = radarX + radarSize / 2 + dx * radarScale;
         const ry = radarY + radarSize / 2 + dy * radarScale;
+        const r = Math.max(2, comet.radius * radarScale);
         if (
             rx >= radarX && rx <= radarX + radarSize &&
             ry >= radarY && ry <= radarY + radarSize
         ) {
             hudCtx.beginPath();
-            hudCtx.arc(rx, ry, Math.max(2, comet.radius * radarScale), 0, Math.PI * 2);
+            hudCtx.arc(rx, ry, r, 0, Math.PI * 2);
             hudCtx.fillStyle = "#fff"; // White for comets
             hudCtx.fill();
+            
+            const hitboxBuffer = 5; // Buffer for hitbox detection
+            
+            // Store hitbox for click detection
+            radarCelestialHitboxes.push({
+                object: comet,
+                type: 'comet',
+                x: rx,
+                y: ry,
+                r: r + hitboxBuffer
+            });
         }
     }
     
@@ -2400,24 +2723,48 @@ class Star {
         this.y = y;       // world Y
         this.radius = radius;
         this.mass = this.radius * 2; // Mass proportional to radius
+        this.velocityX = 0; // Star can now move
+        this.velocityY = 0; // Star can now move
     }
     show() {
         ctx.save();
         ctx.translate(this.x, this.y);
+        
         const glowRadius = this.radius * 5;
-        const gradient = ctx.createRadialGradient(this.x, this.y, 0, this.x, this.y, glowRadius);
-        gradient.addColorStop(0, "#ffc");
-        gradient.addColorStop(1, "rgba(0, 0, 0, 0)");
-        ctx.fillStyle = gradient;
-        ctx.beginPath();
-        ctx.arc(this.x, this.y, glowRadius, 0, Math.PI * 2);
-        ctx.fill();
-        ctx.closePath();
-        ctx.beginPath();
-        ctx.arc(0, 0, this.radius, 0, Math.PI * 2);
-        ctx.closePath();
-        ctx.clip();
-        ctx.drawImage(gallery.yellowStar, -this.radius, -this.radius, this.radius * 2, this.radius * 2);
+        
+        if (this.radius <= 150) {
+            // Create gradient with local coordinates (0,0 since we translated)
+            const gradient = ctx.createRadialGradient(0, 0, 0, 0, 0, glowRadius);
+            gradient.addColorStop(0, "#fa8");
+            gradient.addColorStop(1, "rgba(0, 0, 0, 0)");
+            ctx.fillStyle = gradient;
+            ctx.beginPath();
+            ctx.arc(0, 0, glowRadius, 0, Math.PI * 2);
+            ctx.fill();
+            
+            // Draw the star itself
+            ctx.beginPath();
+            ctx.arc(0, 0, this.radius, 0, Math.PI * 2);
+            ctx.closePath();
+            ctx.clip();
+            ctx.drawImage(gallery.redStar, -this.radius, -this.radius, this.radius * 2, this.radius * 2);
+        } else {
+            // Create gradient with local coordinates (0,0 since we translated)
+            const gradient = ctx.createRadialGradient(0, 0, 0, 0, 0, glowRadius);
+            gradient.addColorStop(0, "#ffc");
+            gradient.addColorStop(1, "rgba(0, 0, 0, 0)");
+            ctx.fillStyle = gradient;
+            ctx.beginPath();
+            ctx.arc(0, 0, glowRadius, 0, Math.PI * 2);
+            ctx.fill();
+            
+            // Draw the star itself
+            ctx.beginPath();
+            ctx.arc(0, 0, this.radius, 0, Math.PI * 2);
+            ctx.closePath();
+            ctx.clip();
+            ctx.drawImage(gallery.yellowStar, -this.radius, -this.radius, this.radius * 2, this.radius * 2);
+        }
         ctx.restore();
     }
 }
@@ -2454,7 +2801,7 @@ class Comet {
         const distanceToStar = Math.hypot(star.x - this.x, star.y - this.y);
         
         // Generate ion tail particles (repelled directly away from star)
-        if (distanceToStar < 10000) { // Only generate tails when close enough to star
+        if (distanceToStar < 20000) { // Only generate tails when close enough to star
             const ionDirection = Math.atan2(this.y - star.y, this.x - star.x);
             const ionParticle = new IonParticle(
                 this.x + Math.random() * 10 - 5,
@@ -2467,7 +2814,7 @@ class Comet {
         }
         
         // Generate dust tail particles (trailing behind comet)
-        if (distanceToStar < 15000) {
+        if (distanceToStar < 30000) {
             const dustDirection = Math.atan2(-this.velocityY, -this.velocityX);
             const dustParticle = new DustParticle(
                 this.x + Math.random() * 8 - 4,
@@ -2480,7 +2827,7 @@ class Comet {
         }
 
         // Delete ejected comets after a certain distance
-        const maxDistance = worldSize * 1.2; // Maximum distance from star to keep comet
+        const maxDistance = 200000; // Maximum distance from star to keep comet
         const cometDistance = Math.hypot(this.x - star.x, this.y - star.y);
         if (cometDistance > maxDistance) {
             // Create explosion particles before deleting
@@ -2518,7 +2865,7 @@ class IonParticle {
         this.size = 32 + Math.random() * 4;
         
         // Intensity based on distance to star (closer = brighter tails)
-        this.intensity = Math.max(0.3, 1 - (distanceToStar / 10000));
+        this.intensity = Math.max(0.3, 1 - (distanceToStar / 20000));
     }
     
     update() {
@@ -2565,7 +2912,7 @@ class DustParticle {
         this.size = 32 + Math.random() * 3;
         
         // Intensity based on distance to star
-        this.intensity = Math.max(0.2, 1 - (distanceToStar / 15000));
+        this.intensity = Math.max(0.2, 1 - (distanceToStar / 30000));
         
         // Drift velocity (affected by solar wind simulation)
         this.driftX = (Math.random() - 0.5) * 0.2;
@@ -2870,13 +3217,37 @@ window.addEventListener("keydown", (e) => {
 
 // Spawn Comets
 function spawnComet() {
-    // Calculate a random angle and distance from the star
+    // Randomly choose which star to orbit (70% main star, 30% binary star)
+    const orbitMainStar = Math.random() < 0.7;
+    const targetStar = orbitMainStar ? stars[0] : (stars.length > 1 ? stars[1] : stars[0]);
+    
+    // Calculate a random angle
     const angle = Math.random() * Math.PI * 2;
-    const cometDist = Math.random() * worldSize; // Random distance from the star
+    
+    let cometDist;
+    let minCometDistance;
+    let maxCometDistance;
+    
+    if (orbitMainStar) {
+        // Bias comet spawning beyond the third planet (at distance 25000) for main star
+        const planet3Distance = 25000;
+        minCometDistance = planet3Distance - 5000; // Start 5000 units before Planet 3
+        maxCometDistance = 40000; // Don't go too far to avoid binary star region
+    } else {
+        // For binary star, spawn comets in its local region
+        const binaryPlanetDistance = 8000; // Binary Planet B2 distance
+        minCometDistance = binaryPlanetDistance - 3000; // Start before Binary Planet B2
+        maxCometDistance = 15000; // Local region around binary star
+    }
+    
+    // Create biased distribution favoring outer regions
+    const randomFactor = Math.random();
+    const biasedFactor = Math.pow(randomFactor, 0.5); // Square root for outward bias
+    cometDist = minCometDistance + (maxCometDistance - minCometDistance) * biasedFactor;
 
-    // Calculate comet's world position
-    const cometX = star.x + Math.cos(angle) * cometDist;
-    const cometY = star.y + Math.sin(angle) * cometDist;
+    // Calculate comet's world position relative to chosen star
+    const cometX = targetStar.x + Math.cos(angle) * cometDist;
+    const cometY = targetStar.y + Math.sin(angle) * cometDist;
 
     // Set comet radius (adjust as needed)
     const cometRadius = Math.floor(Math.random() * 15) + 5; // Random radius between 5 and 20
@@ -2884,25 +3255,32 @@ function spawnComet() {
     // Create the comet
     let comet = new Comet(cometX, cometY, cometRadius);
 
-    // Calculate the vector from star to comet
-    const dx = cometX - star.x;
-    const dy = cometY - star.y;
+    // Calculate the vector from chosen star to comet
+    const dx = cometX - targetStar.x;
+    const dy = cometY - targetStar.y;
+    const actualDistance = Math.sqrt(dx * dx + dy * dy);
 
-    // Calculate orbital speed
-    const orbitalSpeed = Math.sqrt(G * star.mass / cometDist);
+    // Calculate orbital speed around the chosen star
+    const orbitalSpeed = Math.sqrt(G * targetStar.mass / actualDistance);
 
-    // --- Add this: randomize the speed factor ---
+    // Randomize the speed factor for varied orbital characteristics
     const speedFactor = 0.1 + Math.random() * 0.4; // Range: 0.1 to 0.5
 
-    // Perpendicular direction (tangent to the orbit)
-    const perpX = -dy / cometDist;
-    const perpY = dx / cometDist;
+    // Perpendicular direction (tangent to the orbit around chosen star)
+    const perpX = -dy / actualDistance;
+    const perpY = dx / actualDistance;
 
-    // 10. Set the comet's velocity
-    comet.velocityX = perpX * orbitalSpeed * speedFactor;
-    comet.velocityY = perpY * orbitalSpeed * speedFactor;
+    // Set the comet's velocity (orbital motion around chosen star)
+    const cometOrbitalVelX = perpX * orbitalSpeed * speedFactor;
+    const cometOrbitalVelY = perpY * orbitalSpeed * speedFactor;
+    
+    // Add the star's velocity to the comet's orbital velocity (inheritance of motion)
+    comet.velocityX = cometOrbitalVelX + (targetStar.velocityX || 0);
+    comet.velocityY = cometOrbitalVelY + (targetStar.velocityY || 0);
 
     comets.push(comet);
+    const starName = orbitMainStar ? "Solace (main star)" : "Nemesis (binary star)";
+    console.log(`Spawned comet around ${starName} at distance ${actualDistance.toFixed(0)} from star`);
 }
 
 // Collision check function
@@ -2922,7 +3300,7 @@ function checkBodyCollision(body1, body2) {
     return distance < minDist;
 }
 
-function predictShipTrajectory(ship, planets, star, steps = radarSteps, timeStep = 1) {
+function predictShipTrajectory(ship, planets, allStars, steps = radarSteps, timeStep = 1) {
     const path = [];
     
     // Create simulation copy of ship
@@ -2943,18 +3321,30 @@ function predictShipTrajectory(ship, planets, star, steps = radarSteps, timeStep
         radius: planet.radius
     }));
     
+    // Create copies of all star states for simulation
+    const simulatedStars = allStars.map(starBody => ({
+        x: starBody.x,
+        y: starBody.y,
+        vx: starBody.velocityX,
+        vy: starBody.velocityY,
+        mass: starBody.mass,
+        radius: starBody.radius
+    }));
+    
     for (let step = 0; step < steps; step++) {
         // Calculate gravitational forces on ship
         let fx = 0, fy = 0;
         
-        // Gravity from star
-        const dxStar = star.x - simShip.x;
-        const dyStar = star.y - simShip.y;
-        const distSqStar = dxStar * dxStar + dyStar * dyStar + 1e-6;
-        const distStar = Math.sqrt(distSqStar);
-        const starForce = G * star.mass / distSqStar;
-        fx += (dxStar / distStar) * starForce;
-        fy += (dyStar / distStar) * starForce;
+        // Gravity from ALL stars
+        for (let starBody of simulatedStars) {
+            const dxStar = starBody.x - simShip.x;
+            const dyStar = starBody.y - simShip.y;
+            const distSqStar = dxStar * dxStar + dyStar * dyStar + 1e-6;
+            const distStar = Math.sqrt(distSqStar);
+            const starForce = G * starBody.mass / distSqStar;
+            fx += (dxStar / distStar) * starForce;
+            fy += (dyStar / distStar) * starForce;
+        }
         
         // Gravity from planets
         for (let i = 0; i < simulatedPlanets.length; i++) {
@@ -2993,17 +3383,60 @@ function predictShipTrajectory(ship, planets, star, steps = radarSteps, timeStep
             const planet = simulatedPlanets[i];
             const force = planetForces[i];
             
-            // Add star gravity to Barnes-Hut calculated forces
-            const dxStar = star.x - planet.x;
-            const dyStar = star.y - planet.y;
-            const distSqStar = dxStar * dxStar + dyStar * dyStar + 1e-6;
-            const distStar = Math.sqrt(distSqStar);
-            const starForce = G * star.mass / distSqStar;
+            // Add gravity from ALL stars to Barnes-Hut calculated forces
+            let starForceX = 0, starForceY = 0;
+            for (let starBody of simulatedStars) {
+                const dxStar = starBody.x - planet.x;
+                const dyStar = starBody.y - planet.y;
+                const distSqStar = dxStar * dxStar + dyStar * dyStar + 1e-6;
+                const distStar = Math.sqrt(distSqStar);
+                const starForce = G * starBody.mass / distSqStar;
+                starForceX += (dxStar / distStar) * starForce;
+                starForceY += (dyStar / distStar) * starForce;
+            }
             
-            planet.vx += (force.fx + (dxStar / distStar) * starForce) * timeStep;
-            planet.vy += (force.fy + (dyStar / distStar) * starForce) * timeStep;
+            planet.vx += (force.fx + starForceX) * timeStep;
+            planet.vy += (force.fy + starForceY) * timeStep;
             planet.x += planet.vx * timeStep;
             planet.y += planet.vy * timeStep;
+        }
+        
+        // Update star positions
+        for (let i = 0; i < simulatedStars.length; i++) {
+            const starBody = simulatedStars[i];
+            
+            // Calculate forces from other stars and planets
+            let starForceX = 0, starForceY = 0;
+            
+            // Gravity from other stars
+            for (let j = 0; j < simulatedStars.length; j++) {
+                if (i !== j) {
+                    const otherStar = simulatedStars[j];
+                    const dxStar = otherStar.x - starBody.x;
+                    const dyStar = otherStar.y - starBody.y;
+                    const distSqStar = dxStar * dxStar + dyStar * dyStar + 1e-6;
+                    const distStar = Math.sqrt(distSqStar);
+                    const force = G * otherStar.mass / distSqStar;
+                    starForceX += (dxStar / distStar) * force;
+                    starForceY += (dyStar / distStar) * force;
+                }
+            }
+            
+            // Gravity from planets
+            for (let planet of simulatedPlanets) {
+                const dxPlanet = planet.x - starBody.x;
+                const dyPlanet = planet.y - starBody.y;
+                const distSqPlanet = dxPlanet * dxPlanet + dyPlanet * dyPlanet + 1e-6;
+                const distPlanet = Math.sqrt(distSqPlanet);
+                const planetForce = G * planet.mass / distSqPlanet;
+                starForceX += (dxPlanet / distPlanet) * planetForce;
+                starForceY += (dyPlanet / distPlanet) * planetForce;
+            }
+            
+            starBody.vx += starForceX * timeStep;
+            starBody.vy += starForceY * timeStep;
+            starBody.x += starBody.vx * timeStep;
+            starBody.y += starBody.vy * timeStep;
         }
         
         // Record ship position every few steps to reduce data
@@ -3018,7 +3451,7 @@ function predictShipTrajectory(ship, planets, star, steps = radarSteps, timeStep
     return path;
 }
 
-function predictOrbit(targetPlanet, planets, star, steps = radarSteps, timeStep) {
+function predictOrbit(targetPlanet, planets, allStars, steps = radarSteps, timeStep) {
     if (!planets || !Array.isArray(planets)) return []; // Prevent crash if planets is undefined
 
     const path = [];
@@ -3034,38 +3467,62 @@ function predictOrbit(targetPlanet, planets, star, steps = radarSteps, timeStep)
         isTarget: planet === targetPlanet
     }));
     
+    // Create copies of all star states for simulation
+    const simulatedStars = allStars.map(starBody => ({
+        x: starBody.x,
+        y: starBody.y,
+        vx: starBody.velocityX,
+        vy: starBody.velocityY,
+        mass: starBody.mass,
+        radius: starBody.radius
+    }));
+    
     // Find the target planet in our simulation
     const targetIndex = planets.indexOf(targetPlanet);
     
     for (let step = 0; step < steps; step++) {
         // Calculate forces using Barnes-Hut algorithm
-        const planetBodies = simulatedPlanets.map(planet => ({
-            x: planet.x,
-            y: planet.y,
-            mass: planet.mass,
-            radius: planet.radius
-        }));
+        const allBodies = [
+            // Include all stars
+            ...simulatedStars.map(starBody => ({
+                x: starBody.x,
+                y: starBody.y,
+                mass: starBody.mass,
+                radius: starBody.radius
+            })),
+            // Include all planets
+            ...simulatedPlanets.map(planet => ({
+                x: planet.x,
+                y: planet.y,
+                mass: planet.mass,
+                radius: planet.radius
+            }))
+        ];
         
-        const forces = calculateBarnesHutForces(planetBodies);
+        const forces = calculateBarnesHutForces(allBodies);
         
-        // Update all planets simultaneously using calculated forces with Verlet-like integration
+        // Update all planets simultaneously using calculated forces
         for (let i = 0; i < simulatedPlanets.length; i++) {
             const planet = simulatedPlanets[i];
             
-            // Add star gravity to Barnes-Hut calculated forces
-            const dxStar = star.x - planet.x;
-            const dyStar = star.y - planet.y;
-            const distSqStar = dxStar * dxStar + dyStar * dyStar + 1e-6;
-            const distStar = Math.sqrt(distSqStar);
-            const starForce = G * star.mass / distSqStar;
-            
+            // The forces array includes forces from all bodies (stars + planets)
             // Update velocity (Leapfrog integration for better stability)
-            planet.vx += (forces[i].fx + (dxStar / distStar) * starForce) * timeStep;
-            planet.vy += (forces[i].fy + (dyStar / distStar) * starForce) * timeStep;
+            const planetForceIndex = simulatedStars.length + i; // Planet forces come after star forces
+            planet.vx += forces[planetForceIndex].fx * timeStep;
+            planet.vy += forces[planetForceIndex].fy * timeStep;
             
             // Update position
             planet.x += planet.vx * timeStep;
             planet.y += planet.vy * timeStep;
+        }
+        
+        // Update star positions too
+        for (let i = 0; i < simulatedStars.length; i++) {
+            const starBody = simulatedStars[i];
+            starBody.vx += forces[i].fx * timeStep;
+            starBody.vy += forces[i].fy * timeStep;
+            starBody.x += starBody.vx * timeStep;
+            starBody.y += starBody.vy * timeStep;
         }
         
         // Record the target planet's position every few steps to reduce data
@@ -3081,10 +3538,10 @@ function predictOrbit(targetPlanet, planets, star, steps = radarSteps, timeStep)
 }
 
 // Predict orbits for all planets simultaneously to enable collision detection
-function predictAllPlanetOrbits(planets, star, steps = radarSteps, timeStep = 10) {
+function predictAllPlanetOrbits(planets, allStars, steps = radarSteps, timeStep = 10) {
     if (!planets || !Array.isArray(planets)) return []; // Prevent crash if planets is undefined
 
-    const allPaths = planets.map(() => []); // Array of paths, one for each planet
+    const allPlanetTrajectories = planets.map(() => []); // Array of paths, one for each planet
     
     // Create copies of all planet states for simulation
     const simulatedPlanets = planets.map(planet => ({
@@ -3096,31 +3553,54 @@ function predictAllPlanetOrbits(planets, star, steps = radarSteps, timeStep = 10
         radius: planet.radius
     }));
     
+    // Create copies of all star states for simulation
+    const simulatedStars = allStars.map(starBody => ({
+        x: starBody.x,
+        y: starBody.y,
+        vx: starBody.velocityX,
+        vy: starBody.velocityY,
+        mass: starBody.mass,
+        radius: starBody.radius
+    }));
+    
     for (let step = 0; step < steps; step++) {
-        // Calculate forces using Barnes-Hut algorithm
-        const planetBodies = simulatedPlanets.map(planet => ({
-            x: planet.x,
-            y: planet.y,
-            mass: planet.mass,
-            radius: planet.radius
-        }));
+        // Calculate forces using Barnes-Hut algorithm including all stars
+        const allBodies = [
+            // Include all stars
+            ...simulatedStars.map(starBody => ({
+                x: starBody.x,
+                y: starBody.y,
+                mass: starBody.mass,
+                radius: starBody.radius
+            })),
+            // Include all planets
+            ...simulatedPlanets.map(planet => ({
+                x: planet.x,
+                y: planet.y,
+                mass: planet.mass,
+                radius: planet.radius
+            }))
+        ];
         
-        const forces = calculateBarnesHutForces(planetBodies);
+        const forces = calculateBarnesHutForces(allBodies);
+        
+        // Update stars first
+        for (let i = 0; i < simulatedStars.length; i++) {
+            const starBody = simulatedStars[i];
+            starBody.vx += forces[i].fx * timeStep;
+            starBody.vy += forces[i].fy * timeStep;
+            starBody.x += starBody.vx * timeStep;
+            starBody.y += starBody.vy * timeStep;
+        }
         
         // Update all planets simultaneously using calculated forces
         for (let i = 0; i < simulatedPlanets.length; i++) {
             const planet = simulatedPlanets[i];
             
-            // Add star gravity to Barnes-Hut calculated forces
-            const dxStar = star.x - planet.x;
-            const dyStar = star.y - planet.y;
-            const distSqStar = dxStar * dxStar + dyStar * dyStar + 1e-6;
-            const distStar = Math.sqrt(distSqStar);
-            const starForce = G * star.mass / distSqStar;
-            
-            // Update velocity
-            planet.vx += (forces[i].fx + (dxStar / distStar) * starForce) * timeStep;
-            planet.vy += (forces[i].fy + (dyStar / distStar) * starForce) * timeStep;
+            // The forces array includes forces from all bodies (stars + planets)
+            const planetForceIndex = simulatedStars.length + i; // Planet forces come after star forces
+            planet.vx += forces[planetForceIndex].fx * timeStep;
+            planet.vy += forces[planetForceIndex].fy * timeStep;
             
             // Update position
             planet.x += planet.vx * timeStep;
@@ -3130,16 +3610,15 @@ function predictAllPlanetOrbits(planets, star, steps = radarSteps, timeStep = 10
         // Record positions for all planets every few steps to reduce data
         if (step % 2 === 0) {
             for (let i = 0; i < simulatedPlanets.length; i++) {
-                allPaths[i].push({ 
+                allPlanetTrajectories[i].push({ 
                     x: simulatedPlanets[i].x, 
-                    y: simulatedPlanets[i].y,
-                    step: step // Include step number for collision timing
+                    y: simulatedPlanets[i].y
                 });
             }
         }
     }
 
-    return allPaths;
+    return allPlanetTrajectories;
 }
 
 // Detect collisions between predicted planet paths
